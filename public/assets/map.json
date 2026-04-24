@@ -1,0 +1,36 @@
+{
+  "_comment": "Configuration for map.gltf — edit values and reload the game to apply changes.",
+
+  "file": "map.gltf",
+
+  "scale": 1.0,
+
+  "position": {
+    "x": 0,
+    "y": 0,
+    "z": 0
+  },
+
+  "rotation": {
+    "x": 0,
+    "y": 0,
+    "z": 0
+  },
+
+  "collision": {
+    "enabled": true,
+    "impostor": "MeshImpostor",
+    "friction":    0.5,
+    "restitution": 0.0
+  },
+
+  "lighting": {
+    "receiveShadows": true,
+    "castShadows":    false
+  },
+
+  "fog": {
+    "enabled": false,
+    "density": 0.002
+  }
+}

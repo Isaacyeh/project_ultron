@@ -1,0 +1,47 @@
+{
+  "_comment": "Configuration for BaseCharacter.gltf — edit values and reload the game to apply changes.",
+
+  "file": "BaseCharacter.gltf",
+
+  "scale": 1.0,
+
+  "spawnOffset": {
+    "x": 0,
+    "y": 0,
+    "z": 0
+  },
+
+  "animations": {
+    "idle":     "Idle",
+    "walk":     "Walk",
+    "run":      "Run",
+    "jump":     "Jump",
+    "death":    "Death",
+    "defeat":   "Defeat",
+    "punch":    "Punch",
+    "roll":     "Roll",
+    "pickup":   "PickUp"
+  },
+
+  "animationBlendSpeed": 0.15,
+
+  "movement": {
+    "walkSpeed":  0.08,
+    "runSpeed":   0.16,
+    "turnSpeed":  0.05
+  },
+
+  "collision": {
+    "radius":  0.4,
+    "height":  1.8
+  },
+
+  "camera": {
+    "thirdPerson": {
+      "radius":        8,
+      "heightOffset":  3,
+      "lowerRadiusLimit": 2,
+      "upperRadiusLimit": 20
+    }
+  }
+}
