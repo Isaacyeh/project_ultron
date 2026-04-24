@@ -1,0 +1,14 @@
+{
+  "name": "multiplayer-3d-game",
+  "version": "1.0.0",
+  "description": "Multiplayer 3D WebGL game with Babylon.js",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2"
+  }
+}
