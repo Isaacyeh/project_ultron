@@ -11,7 +11,7 @@ const Renderer = (() => {
 
   // ── Private state ─────────────────────────────────────────────────────────
   let engine, scene, camera, shadowGenerator;
-  let localPlayer = null;       // { root, animGroups, config, currentAnim }
+  let localPlayer = null;       // { root, collider, animGroups, config, currentAnim }
   const remotePlayers = {};     // id → { root, animGroups, nameTag, currentAnim }
 
   // ── Animation helpers ─────────────────────────────────────────────────────
@@ -196,9 +196,23 @@ const Renderer = (() => {
           // Enable collisions and shadows on all real meshes
           meshes.forEach(m => {
             if (!m.getTotalVertices || m.getTotalVertices() === 0) return;
-            m.checkCollisions = mapConfig.collision?.enabled ?? true;
+
+            // Some CAD/GLTF exports end up with inward-facing triangle winding.
+            // Babylon collisions are triangle-facing sensitive, which can cause
+            // one-way walls (pass in from outside, blocked from inside).
+            // Flip faces once so collision blocks on the intended outside.
+            if (mapConfig.collision?.flipFaces === true && typeof m.flipFaces === "function") {
+              try {
+                m.flipFaces(true);
+                m.refreshBoundingInfo(true);
+              } catch (e) {
+                console.warn("[Map] Could not flip faces for mesh:", m.name, e);
+              }
+            }
+
+            m.checkCollisions = true;
             m.receiveShadows  = mapConfig.lighting?.receiveShadows ?? true;
-            if (m.material) m.material.backFaceCulling = true;
+            if (m.material) m.material.backFaceCulling = false;
             if (typeof m.freezeWorldMatrix === "function") m.freezeWorldMatrix();
           });
 
@@ -263,13 +277,26 @@ const Renderer = (() => {
             }
           });
 
-          // Collision ellipsoid
+          // Create a hidden collider that participates in scene collisions.
+          // The visible GLTF hierarchy stays parented under `root`.
           const col = charConfig.collision ?? { radius: 0.4, height: 1.8 };
+          const colliderHalfHeight = col.height / 2;
+          const collider = BABYLON.MeshBuilder.CreateBox(
+            "localPlayerCollider",
+            { width: col.radius * 2, depth: col.radius * 2, height: col.height },
+            scene
+          );
+          collider.isVisible = false;
+          collider.isPickable = false;
+          collider.checkCollisions = true;
+          collider.ellipsoid = new BABYLON.Vector3(col.radius, colliderHalfHeight, col.radius);
+          collider.ellipsoidOffset = new BABYLON.Vector3(0, colliderHalfHeight, 0);
+          collider.position = new BABYLON.Vector3(
+            root.position.x,
+            root.position.y,
+            root.position.z
+          );
 
-          // Set collision on the actual mesh child
-          meshes[0].ellipsoid       = new BABYLON.Vector3(col.radius, col.height / 2, col.radius);
-          meshes[0].ellipsoidOffset = new BABYLON.Vector3(0, col.height / 2, 0);
-          meshes[0].checkCollisions = true;
           // Start Idle
           const idleAnimName = charConfig.animations?.idle ?? "Idle";
           playAnim(animGroups, idleAnimName, true);
@@ -280,7 +307,13 @@ const Renderer = (() => {
             root.position.add(new BABYLON.Vector3(0, heightOffset, 0))
           );
 
-          localPlayer = { root, animGroups, config: charConfig, currentAnim: idleAnimName };
+          localPlayer = {
+            root,
+            collider,
+            animGroups,
+            config: charConfig,
+            currentAnim: idleAnimName
+          };
           setLoadProgress(85, "Character ready.");
           resolve(localPlayer);
         },
@@ -413,6 +446,28 @@ const Renderer = (() => {
     return targetAnim;
   }
 
+  // ── Local collision movement ─────────────────────────────────────────────
+  function moveLocalWithCollisions(delta) {
+    if (!localPlayer || !localPlayer.collider) return;
+
+    const distance = delta.length();
+    if (distance === 0) {
+      localPlayer.root.position.copyFrom(localPlayer.collider.position);
+      return;
+    }
+
+    const collider = localPlayer.collider;
+    const maxStep = 0.08;
+    const steps = Math.max(1, Math.ceil(distance / maxStep));
+    const step = delta.scale(1 / steps);
+
+    for (let i = 0; i < steps; i++) {
+      collider.moveWithCollisions(step);
+    }
+
+    localPlayer.root.position.copyFrom(localPlayer.collider.position);
+  }
+
   // ── Camera follow ─────────────────────────────────────────────────────────
   function updateCameraTarget() {
     if (!localPlayer) return;
@@ -442,6 +497,7 @@ const Renderer = (() => {
     removeRemotePlayer,
     updateRemotePlayer,
     updateLocalAnimation,
+    moveLocalWithCollisions,
     updateCameraTarget,
     startRenderLoop,
     setLoadProgress,

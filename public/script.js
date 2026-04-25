@@ -176,7 +176,8 @@ function onFrame(dt) {
   }
 
   if (isMoving) {
-    move.normalize().scaleInPlace(speed);
+    const frameScale = Math.min(dt * 60, 2);
+    move.normalize().scaleInPlace(speed * frameScale);
 
     // Rotate character to face movement direction
     const targetAngle = Math.atan2(move.x, move.z);
@@ -189,10 +190,7 @@ function onFrame(dt) {
     const turnSpeed = charConfig.movement?.turnSpeed ?? 0.15;
     player.root.rotation.y += diff * turnSpeed;
 
-    player.root.position.addInPlace(move);
-
-    // Basic floor clamp (y ≥ 0)
-    if (player.root.position.y < 0) player.root.position.y = 0;
+    Renderer.moveLocalWithCollisions(move);
   }
 
   // ── Animation ─────────────────────────────────────────────────────────
