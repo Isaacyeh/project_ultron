@@ -5,6 +5,8 @@
 
   "scale": 1.0,
 
+  "modelYawOffset": 3.141592653589793,
+
   "spawnOffset": {
     "x": 0,
     "y": 0,
@@ -28,7 +30,7 @@
   "movement": {
     "walkSpeed":  0.08,
     "runSpeed":   0.16,
-    "turnSpeed":  0.05
+    "turnSpeed":  0.25
   },
 
   "collision": {

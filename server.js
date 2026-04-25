@@ -96,5 +96,5 @@ setInterval(() => {
 }, 100);
 
 server.listen(PORT, () => {
-  console.log(`✅  Game server running at http://localhost:${PORT}`);
+  console.log(`Game server running at http://localhost:${PORT}`);
 });

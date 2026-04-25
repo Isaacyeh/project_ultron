@@ -50,8 +50,13 @@ const Renderer = (() => {
       preserveDrawingBuffer: true,
       stencil: true,
       antialias: true,
-      adaptToDeviceRatio: true
+      adaptToDeviceRatio: false
     });
+
+    const deviceRatio = window.devicePixelRatio || 1;
+    if (deviceRatio > 1) {
+      engine.setHardwareScalingLevel(deviceRatio);
+    }
 
     scene = new BABYLON.Scene(engine);
     scene.clearColor   = new BABYLON.Color4(0.02, 0.04, 0.10, 1.0);
@@ -85,9 +90,9 @@ const Renderer = (() => {
     sun.diffuse   = new BABYLON.Color3(0.9, 0.92, 1.0);
 
     // Shadow generator
-    shadowGenerator = new BABYLON.ShadowGenerator(1024, sun);
+    shadowGenerator = new BABYLON.ShadowGenerator(512, sun);
     shadowGenerator.useBlurExponentialShadowMap = true;
-    shadowGenerator.blurKernel = 16;
+    shadowGenerator.blurKernel = 8;
 
     // Soft fill from opposite side
     const fill = new BABYLON.DirectionalLight("fill", new BABYLON.Vector3(1, -0.5, 1), scene);
@@ -134,9 +139,7 @@ const Renderer = (() => {
   }
 
   // ── Load map.gltf ─────────────────────────────────────────────────────────
-  // The map is exported from Onshape which uses a Z-up coordinate system.
-  // Even though the GLTF spec is Y-up, Onshape embeds geometry in Z-up space.
-  // We correct this by rotating the imported root -90° around X.
+  // Rotation is driven by map.json so each map can define its own orientation.
   // The map geometry is ~2.54 m across, so we scale it up to arena size.
   function loadMap(mapConfig) {
     setLoadProgress(20, "Loading map…");
@@ -162,10 +165,16 @@ const Renderer = (() => {
             || (meshes[0] && meshes[0].parent)
             || meshes[0];
 
+          // Allow per-map rotation in radians from JSON.
+          const mapRotation = new BABYLON.Vector3(
+            mapConfig.rotation?.x ?? -Math.PI / 2,
+            mapConfig.rotation?.y ?? 0,
+            mapConfig.rotation?.z ?? 0
+          );
+
           if (pivot && typeof pivot.scaling !== "undefined") {
             pivot.scaling  = new BABYLON.Vector3(WORLD_SCALE, WORLD_SCALE, WORLD_SCALE);
-            // Onshape Z-up → Babylon Y-up: rotate -90° on X axis
-            pivot.rotation = new BABYLON.Vector3(-Math.PI / 2, 0, 0);
+            pivot.rotation = mapRotation;
             pivot.position = new BABYLON.Vector3(
               mapConfig.position?.x ?? 0,
               mapConfig.position?.y ?? 0,
@@ -175,7 +184,7 @@ const Renderer = (() => {
             // Fallback: set each mesh directly
             meshes.forEach(m => {
               m.scaling  = new BABYLON.Vector3(WORLD_SCALE, WORLD_SCALE, WORLD_SCALE);
-              m.rotation = new BABYLON.Vector3(-Math.PI / 2, 0, 0);
+              m.rotation = mapRotation;
               m.position = new BABYLON.Vector3(
                 mapConfig.position?.x ?? 0,
                 mapConfig.position?.y ?? 0,
@@ -189,7 +198,8 @@ const Renderer = (() => {
             if (!m.getTotalVertices || m.getTotalVertices() === 0) return;
             m.checkCollisions = mapConfig.collision?.enabled ?? true;
             m.receiveShadows  = mapConfig.lighting?.receiveShadows ?? true;
-            if (m.material) m.material.backFaceCulling = false;
+            if (m.material) m.material.backFaceCulling = true;
+            if (typeof m.freezeWorldMatrix === "function") m.freezeWorldMatrix();
           });
 
           setLoadProgress(45, "Map loaded.");
@@ -229,16 +239,21 @@ const Renderer = (() => {
             return reject(new Error("Character GLTF returned no meshes."));
           }
 
-          const root = meshes[0];
-          root.name = "localPlayer";
-
-          const s = charConfig.scale ?? 1;
-          root.scaling  = new BABYLON.Vector3(s, s, s);
+          // Create a parent transform node for cleaner rotation control
+          const root = new BABYLON.TransformNode("localPlayer", scene);
+          const visualRoot = new BABYLON.TransformNode("localPlayerVisual", scene);
+          visualRoot.parent = root;
+          visualRoot.rotation.y = charConfig.modelYawOffset ?? 0;
           root.position = new BABYLON.Vector3(
             (spawnPos?.x ?? 0) + (charConfig.spawnOffset?.x ?? 0),
             (spawnPos?.y ?? 0) + (charConfig.spawnOffset?.y ?? 0),
             (spawnPos?.z ?? 0) + (charConfig.spawnOffset?.z ?? 0)
           );
+
+          // Parent all loaded meshes to the transform node
+          meshes[0].parent = visualRoot;
+          const s = charConfig.scale ?? 1;
+          meshes[0].scaling = new BABYLON.Vector3(s, s, s);
 
           // Add to shadow casters
           meshes.forEach(m => {
@@ -250,10 +265,11 @@ const Renderer = (() => {
 
           // Collision ellipsoid
           const col = charConfig.collision ?? { radius: 0.4, height: 1.8 };
-          root.ellipsoid       = new BABYLON.Vector3(col.radius, col.height / 2, col.radius);
-          root.ellipsoidOffset = new BABYLON.Vector3(0, col.height / 2, 0);
-          root.checkCollisions = true;
 
+          // Set collision on the actual mesh child
+          meshes[0].ellipsoid       = new BABYLON.Vector3(col.radius, col.height / 2, col.radius);
+          meshes[0].ellipsoidOffset = new BABYLON.Vector3(0, col.height / 2, 0);
+          meshes[0].checkCollisions = true;
           // Start Idle
           const idleAnimName = charConfig.animations?.idle ?? "Idle";
           playAnim(animGroups, idleAnimName, true);
@@ -293,30 +309,25 @@ const Renderer = (() => {
         function (meshes, _ps, _sk, animGroups) {
           if (!meshes || meshes.length === 0) return resolve(null);
 
-          const root = meshes[0];
-          root.name = "remote_" + id;
-
-          const s = charConfig.scale ?? 1;
-          root.scaling  = new BABYLON.Vector3(s, s, s);
+          // Create a parent transform node for cleaner rotation control
+          const root = new BABYLON.TransformNode("remote_" + id, scene);
+          const visualRoot = new BABYLON.TransformNode("remote_" + id + "_visual", scene);
+          visualRoot.parent = root;
+          visualRoot.rotation.y = charConfig.modelYawOffset ?? 0;
           root.position = new BABYLON.Vector3(
             spawnPos?.x ?? 0, spawnPos?.y ?? 0, spawnPos?.z ?? 0
           );
 
+          // Parent all loaded meshes to the transform node
+          meshes[0].parent = visualRoot;
+          const s = charConfig.scale ?? 1;
+          meshes[0].scaling = new BABYLON.Vector3(s, s, s);
+
           meshes.forEach(m => {
             if (m.getTotalVertices && m.getTotalVertices() > 0) {
-              shadowGenerator.addShadowCaster(m, true);
               m.receiveShadows = true;
             }
-            // Subtle tint to distinguish remotes
-            if (m.material) {
-              try {
-                const mat = m.material.clone("rmat_" + id);
-                if (mat.emissiveColor !== undefined) {
-                  mat.emissiveColor = new BABYLON.Color3(0.05, 0.05, 0.18);
-                }
-                m.material = mat;
-              } catch (_) {}
-            }
+            if (m.material) m.material.backFaceCulling = true;
           });
 
           const idleAnimName = charConfig.animations?.idle ?? "Idle";
@@ -373,7 +384,13 @@ const Renderer = (() => {
       new BABYLON.Vector3(position.x, position.y, position.z),
       0.2
     );
-    rp.root.rotation.y = rotation;
+    
+    // Smooth rotation towards target rotation
+    let diff = rotation - rp.root.rotation.y;
+    // Wrap to [-π, π]
+    while (diff >  Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    rp.root.rotation.y += diff * 0.15;
 
     if (animName && animName !== rp.currentAnim) {
       rp.currentAnim = animName;

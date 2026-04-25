@@ -29,9 +29,9 @@ const SEND_RATE  = 50; // ms between network sends
 let lastSend     = 0;
 
 // ── Movement ───────────────────────────────────────────────────────────────
-const WALK_SPEED = 0.08;
-const RUN_SPEED  = 0.16;
-const TURN_SPEED = 0.04;
+const WALK_SPEED = 1;
+const RUN_SPEED  = 2;
+const TURN_SPEED = 0.1;
 const CAM_KEY_ROT_SPEED = 0.025; // arrow key camera speed (radians/frame)
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -163,15 +163,15 @@ function onFrame(dt) {
   camDir.y = 0;
   camDir.normalize();
 
-  const right = BABYLON.Vector3.Cross(camDir, BABYLON.Vector3.Up()).normalize();
+  const right = BABYLON.Vector3.Cross(BABYLON.Vector3.Up(), camDir).normalize();
 
   let move = BABYLON.Vector3.Zero();
   let isMoving = false;
 
   if (!chatFocused) {
-    if (keys.w) { move.addInPlace(camDir);  isMoving = true; }
-    if (keys.s) { move.addInPlace(camDir.negate()); isMoving = true; }
-    if (keys.a) { move.addInPlace(right.negate()); isMoving = true; }
+    if (keys.w) { move.addInPlace(camDir); isMoving = true; }
+    if (keys.s) { move.addInPlace(camDir.scale(-1)); isMoving = true; }
+    if (keys.a) { move.addInPlace(right.scale(-1)); isMoving = true; }
     if (keys.d) { move.addInPlace(right); isMoving = true; }
   }
 
@@ -185,7 +185,9 @@ function onFrame(dt) {
     // Wrap to [-π, π]
     while (diff >  Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
-    player.root.rotation.y += diff * 0.15;
+    // Use turnSpeed from config, defaulting to 0.15
+    const turnSpeed = charConfig.movement?.turnSpeed ?? 0.15;
+    player.root.rotation.y += diff * turnSpeed;
 
     player.root.position.addInPlace(move);
 
