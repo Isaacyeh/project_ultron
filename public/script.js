@@ -9,6 +9,7 @@
 // ── Configs (loaded from JSON) ─────────────────────────────────────────────
 let charConfig = null;
 let mapConfig  = null;
+let selectedMapId = null;
 
 // ── Input state ────────────────────────────────────────────────────────────
 const keys = {
@@ -41,15 +42,84 @@ async function fetchJSON(url) {
   return r.json();
 }
 
+function pickMapIdFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("map") || params.get("mapId") || null;
+}
+
+async function loadMapConfigFromId() {
+  const requestedMapId = pickMapIdFromURL();
+
+  let mapIndex = null;
+  try {
+    mapIndex = await fetchJSON("/assets/maps.json");
+  } catch (_err) {
+    // Fallback for projects that only have a single map config.
+  }
+
+  if (mapIndex && Array.isArray(mapIndex.maps) && mapIndex.maps.length > 0) {
+    const defaultMapId = mapIndex.defaultMapId || mapIndex.maps[0].id;
+    selectedMapId = requestedMapId || defaultMapId;
+
+    let selectedMap = mapIndex.maps.find(m => m.id === selectedMapId);
+    if (!selectedMap) {
+      console.warn(`[Map] Unknown map id '${selectedMapId}', falling back to '${defaultMapId}'.`);
+      selectedMapId = defaultMapId;
+      selectedMap = mapIndex.maps.find(m => m.id === selectedMapId);
+    }
+
+    if (!selectedMap || !selectedMap.config) {
+      throw new Error("maps.json is missing a valid map entry with a config path.");
+    }
+
+    const mapPath = selectedMap.config.startsWith("/")
+      ? selectedMap.config
+      : `/assets/${selectedMap.config}`;
+
+    const config = await fetchJSON(mapPath);
+    config.id = config.id || selectedMapId;
+    return config;
+  }
+
+  // Legacy fallback: use /assets/map.json when no maps index exists.
+  selectedMapId = requestedMapId || "map";
+  const legacyPath = selectedMapId === "map"
+    ? "/assets/map.json"
+    : `/assets/${selectedMapId}.json`;
+
+  try {
+    const config = await fetchJSON(legacyPath);
+    config.id = config.id || selectedMapId;
+    return config;
+  } catch (err) {
+    if (legacyPath !== "/assets/map.json") {
+      console.warn(`[Map] Failed to load '${legacyPath}', falling back to '/assets/map.json'.`);
+      selectedMapId = "map";
+      const config = await fetchJSON("/assets/map.json");
+      config.id = config.id || selectedMapId;
+      return config;
+    }
+    throw err;
+  }
+}
+
+function getSpawnFromMapConfig(config) {
+  const spawn = config?.spawn || config?.spawns?.default;
+  return {
+    x: spawn?.x ?? 0,
+    y: spawn?.y ?? 0,
+    z: spawn?.z ?? 0
+  };
+}
+
 // ── Bootstrap ──────────────────────────────────────────────────────────────
 async function main() {
   try {
     Renderer.setLoadProgress(5, "Fetching configs…");
 
-    [charConfig, mapConfig] = await Promise.all([
-      fetchJSON("/assets/BaseCharacter.json"),
-      fetchJSON("/assets/map.json")
-    ]);
+    charConfig = await fetchJSON("/assets/BaseCharacter.json");
+    mapConfig = await loadMapConfigFromId();
+    console.log(`[Map] Using map id: ${mapConfig.id}`);
 
     // Apply JSON-driven speeds to Renderer constants
     // (override module-level if provided)
@@ -67,7 +137,7 @@ async function main() {
 
     await Renderer.loadMap(mapConfig);
 
-    const spawn = { x: 0, y: 0, z: 0 };
+    const spawn = getSpawnFromMapConfig(mapConfig);
     await Renderer.loadLocalPlayer(charConfig, spawn);
 
     Renderer.setLoadProgress(95, "Almost there…");
