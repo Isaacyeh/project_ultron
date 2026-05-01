@@ -1,7 +1,7 @@
 {
   "_comment": "Configuration for map_2.gltf. Select this map with ?map=map_2 in the URL.",
   "id": "map_2",
-  "file": "map_2.gltf",
+  "file": "maps/map_2.gltf",
   "scale": 0.5,
   "rotation": {
     "x": -0.78539816339,

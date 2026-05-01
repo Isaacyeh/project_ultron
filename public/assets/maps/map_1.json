@@ -1,8 +1,8 @@
 {
   "_comment": "Configuration for map.gltf (Onshape export, Z-up, ~2.54m wide). Edit and reload to apply.",
   "_note_scale": "The engine applies an internal 8x multiplier on top of 'scale' to bring the map to playable size. scale:1 = 8 Babylon units wide (~8m). Set scale:2 for 16m, etc.",
-  "id": "map",
-  "file": "map.gltf",
+  "id": "map_1",
+  "file": "maps/map_1.gltf",
   "scale": 0.5,
   "rotation": {
     "x": -0.78539816339,

@@ -1,7 +1,7 @@
 {
   "_comment": "Configuration for BaseCharacter.gltf — edit values and reload the game to apply changes.",
 
-  "file": "BaseCharacter.gltf",
+  "file": "characters/BaseCharacter.gltf",
 
   "scale": 1.0,
 

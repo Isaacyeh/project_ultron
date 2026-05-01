@@ -59,7 +59,7 @@ async function loadMapConfigFromId() {
 
   if (mapIndex && Array.isArray(mapIndex.maps) && mapIndex.maps.length > 0) {
     const defaultMapId = mapIndex.defaultMapId || mapIndex.maps[0].id;
-    selectedMapId = requestedMapId || defaultMapId;
+      selectedMapId = requestedMapId || "map_1";
 
     let selectedMap = mapIndex.maps.find(m => m.id === selectedMapId);
     if (!selectedMap) {
@@ -81,21 +81,21 @@ async function loadMapConfigFromId() {
     return config;
   }
 
-  // Legacy fallback: use /assets/map.json when no maps index exists.
-  selectedMapId = requestedMapId || "map";
-  const legacyPath = selectedMapId === "map"
-    ? "/assets/map.json"
-    : `/assets/${selectedMapId}.json`;
+  // Legacy fallback: use /assets/maps/map_1.json when no maps index exists.
+    selectedMapId = requestedMapId || "map_1";
+    const legacyPath = selectedMapId === "map_1"
+      ? "/assets/maps/map_1.json"
+      : `/assets/${selectedMapId}.json`;
 
   try {
     const config = await fetchJSON(legacyPath);
     config.id = config.id || selectedMapId;
     return config;
   } catch (err) {
-    if (legacyPath !== "/assets/map.json") {
-      console.warn(`[Map] Failed to load '${legacyPath}', falling back to '/assets/map.json'.`);
-      selectedMapId = "map";
-      const config = await fetchJSON("/assets/map.json");
+    if (legacyPath !== "/assets/maps/map_1.json") {
+      console.warn(`[Map] Failed to load '${legacyPath}', falling back to '/assets/maps/map_1.json'.`);
+      selectedMapId = "map_1";
+      const config = await fetchJSON("/assets/maps/map_1.json");
       config.id = config.id || selectedMapId;
       return config;
     }
@@ -117,7 +117,7 @@ async function main() {
   try {
     Renderer.setLoadProgress(5, "Fetching configs…");
 
-    charConfig = await fetchJSON("/assets/BaseCharacter.json");
+    charConfig = await fetchJSON("/assets/characters/BaseCharacter.json");
     mapConfig = await loadMapConfigFromId();
     console.log(`[Map] Using map id: ${mapConfig.id}`);
 

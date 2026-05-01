@@ -138,8 +138,8 @@ const Renderer = (() => {
     return camera;
   }
 
-  // ── Load map.gltf ─────────────────────────────────────────────────────────
-  // Rotation is driven by map.json so each map can define its own orientation.
+  // ── Load map_1.gltf ────────────────────────────────────────────────────────
+  // Rotation is driven by map_1.json so each map can define its own orientation.
   // The map geometry is ~2.54 m across, so we scale it up to arena size.
   function loadMap(mapConfig) {
     setLoadProgress(20, "Loading map…");
@@ -154,7 +154,7 @@ const Renderer = (() => {
         function (meshes, _particleSystems, _skeletons, _animationGroups, _transformNodes, _geometries, rootNode) {
 
           if (!meshes || meshes.length === 0) {
-            return reject(new Error("map.gltf loaded but contained no meshes."));
+            return reject(new Error("map_1.gltf loaded but contained no meshes."));
           }
 
           // Scale factor: raw geometry is ~2.54 units wide; multiply to arena size
@@ -230,7 +230,7 @@ const Renderer = (() => {
         function (scene, msg, ex) {
           const detail = (ex && ex.message) ? ex.message : String(msg ?? "unknown error");
           console.error("[Map] Load failed:", detail, ex);
-          reject(new Error("Failed to load map.gltf — " + detail));
+          reject(new Error("Failed to load map_1.gltf — " + detail));
         }
       );
     });

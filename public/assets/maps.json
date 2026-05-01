@@ -1,16 +1,16 @@
 {
   "_comment": "Map registry for map-id based selection. Use ?map=<id> or ?mapId=<id> in the URL.",
-  "defaultMapId": "map",
+  "defaultMapId": "map_1",
   "maps": [
     {
-      "id": "map",
+      "id": "map_1",
       "label": "Arena 1",
-      "config": "map.json"
+      "config": "maps/map_1.json"
     },
     {
       "id": "map_2",
       "label": "Arena 2",
-      "config": "map_2.json"
+      "config": "maps/map_2.json"
     }
   ]
 }
