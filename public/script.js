@@ -290,6 +290,12 @@ function setupInput() {
   const canvas = Renderer.getEngine().getRenderingCanvas();
 
   document.addEventListener("keydown", (e) => {
+    // Escape exits pointer lock
+    if (e.key === "Escape") {
+      document.exitPointerLock();
+      return;
+    }
+
     if (chatFocused) return;
     if (keys.hasOwnProperty(e.key)) { keys[e.key] = true; e.preventDefault(); }
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
@@ -304,6 +310,14 @@ function setupInput() {
     if (keys.hasOwnProperty(e.key)) keys[e.key] = false;
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
       keys[e.code] = false;
+    }
+  });
+
+  // Request pointer lock on canvas click
+  canvas.addEventListener("click", () => {
+    canvas.requestPointerLock = canvas.requestPointerLock || canvas.mozRequestPointerLock;
+    if (canvas.requestPointerLock) {
+      canvas.requestPointerLock();
     }
   });
 
