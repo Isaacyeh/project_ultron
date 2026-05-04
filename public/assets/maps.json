@@ -11,6 +11,11 @@
       "id": "map_2",
       "label": "Arena 2",
       "config": "maps/map_2.json"
+    },
+    {
+      "id": "map_3",
+      "label": "Arena 3",
+      "config": "maps/map_3.json"
     }
   ]
 }
