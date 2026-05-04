@@ -6,6 +6,8 @@
 
 "use strict";
 
+import { Renderer } from "./render.js";
+
 // ── Configs (loaded from JSON) ─────────────────────────────────────────────
 let charConfig = null;
 let mapConfig  = null;
@@ -245,6 +247,8 @@ function onFrame(dt) {
     if (keys.d) { move.addInPlace(right); isMoving = true; }
   }
 
+  // Apply movement and gravity every frame. Movement XZ is computed above; vertical
+  // displacement is handled inside Renderer.moveLocalWithCollisions using scene gravity.
   if (isMoving) {
     const frameScale = Math.min(dt * 60, 2);
     move.normalize().scaleInPlace(speed * frameScale);
@@ -259,9 +263,10 @@ function onFrame(dt) {
     // Use turnSpeed from config, defaulting to 0.15
     const turnSpeed = charConfig.movement?.turnSpeed ?? 0.15;
     player.root.rotation.y += diff * turnSpeed;
-
-    Renderer.moveLocalWithCollisions(move);
   }
+
+  // Always call moveLocalWithCollisions so gravity is applied even when player isn't moving.
+  Renderer.moveLocalWithCollisions(move, dt);
 
   // ── Animation ─────────────────────────────────────────────────────────
   const animName = Renderer.updateLocalAnimation(isMoving, isRunning);

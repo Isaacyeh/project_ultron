@@ -7,7 +7,9 @@
 
 "use strict";
 
-const Renderer = (() => {
+import { GRAVITY_Y, TERMINAL_VELOCITY } from "./variables.js";
+
+export const Renderer = (() => {
 
   // ── Private state ─────────────────────────────────────────────────────────
   let engine, scene, camera, shadowGenerator;
@@ -69,7 +71,7 @@ const Renderer = (() => {
 
     // Enable collisions system
     scene.collisionsEnabled = true;
-    scene.gravity = new BABYLON.Vector3(0, -0.5, 0);
+    scene.gravity = new BABYLON.Vector3(0, GRAVITY_Y, 0);
 
     window.addEventListener("resize", () => engine.resize());
     return { engine, scene };
@@ -211,6 +213,7 @@ const Renderer = (() => {
             }
 
             m.checkCollisions = true;
+            m.isPickable = true;
             m.receiveShadows  = mapConfig.lighting?.receiveShadows ?? true;
             if (m.material) m.material.backFaceCulling = false;
             if (typeof m.freezeWorldMatrix === "function") m.freezeWorldMatrix();
@@ -312,7 +315,9 @@ const Renderer = (() => {
             collider,
             animGroups,
             config: charConfig,
-            currentAnim: idleAnimName
+            currentAnim: idleAnimName,
+            // vertical velocity in world units/second (positive = up)
+            _velY: 0
           };
           setLoadProgress(85, "Character ready.");
           resolve(localPlayer);
@@ -447,25 +452,87 @@ const Renderer = (() => {
   }
 
   // ── Local collision movement ─────────────────────────────────────────────
-  function moveLocalWithCollisions(delta) {
+  // delta: horizontal movement (x,z) per-frame; dt: time delta in seconds
+  function moveLocalWithCollisions(delta, dt = 1 / 60) {
     if (!localPlayer || !localPlayer.collider) return;
 
-    const distance = delta.length();
-    if (distance === 0) {
-      localPlayer.root.position.copyFrom(localPlayer.collider.position);
-      return;
-    }
-
     const collider = localPlayer.collider;
-    const maxStep = 0.08;
-    const steps = Math.max(1, Math.ceil(distance / maxStep));
-    const step = delta.scale(1 / steps);
 
-    for (let i = 0; i < steps; i++) {
-      collider.moveWithCollisions(step);
+    // Ensure vertical velocity is present
+    if (typeof localPlayer._velY !== "number") localPlayer._velY = 0;
+
+    // Use fixed-size physics substeps so gravity feels consistent across varying frame times.
+    const safeDt = Math.max(0, Math.min(dt, 0.1));
+    const targetStepDt = 1 / 120;
+    const physicsSteps = Math.max(1, Math.ceil(safeDt / targetStepDt));
+    const subDt = safeDt / physicsSteps;
+    const horizontalPerStep = delta.scale(1 / physicsSteps);
+
+    const maxStep = 0.08;
+    const groundedEps = 1e-3;
+    const groundProbe = 0.08;
+    const gravityY = scene?.gravity?.y ?? GRAVITY_Y;
+
+    function isGrounded() {
+      if (!scene) return false;
+      const origin = collider.position.add(new BABYLON.Vector3(0, 0.02, 0));
+      const ray = new BABYLON.Ray(origin, BABYLON.Vector3.Down(), groundProbe + 0.02);
+      const pick = scene.pickWithRay(ray, (mesh) => {
+        if (!mesh || !mesh.isEnabled()) return false;
+        if (mesh === collider) return false;
+
+        // Ignore local player visuals/collider hierarchy.
+        let parent = mesh;
+        while (parent) {
+          if (parent === localPlayer.root || parent === collider) return false;
+          parent = parent.parent;
+        }
+        return mesh.checkCollisions === true;
+      });
+
+      return !!(pick && pick.hit && pick.distance <= groundProbe + groundedEps);
     }
 
-    localPlayer.root.position.copyFrom(localPlayer.collider.position);
+    let supported = isGrounded();
+
+    for (let i = 0; i < physicsSteps; i++) {
+      // Gravity acceleration is active only while airborne.
+      if (!supported) {
+        localPlayer._velY += gravityY * subDt;
+        if (localPlayer._velY < TERMINAL_VELOCITY) localPlayer._velY = TERMINAL_VELOCITY;
+      } else {
+        localPlayer._velY = 0;
+      }
+
+      const verticalStep = localPlayer._velY * subDt;
+      const fullStep = new BABYLON.Vector3(
+        horizontalPerStep.x,
+        verticalStep,
+        horizontalPerStep.z
+      );
+
+      const distance = fullStep.length();
+      if (distance === 0) continue;
+
+      const collisionSteps = Math.max(1, Math.ceil(distance / maxStep));
+      const collisionStep = fullStep.scale(1 / collisionSteps);
+
+      for (let j = 0; j < collisionSteps; j++) {
+        collider.moveWithCollisions(collisionStep);
+      }
+
+      const groundedNow = isGrounded();
+
+      // Landing: reset accumulated fall acceleration immediately.
+      if (groundedNow && !supported) {
+        localPlayer._velY = 0;
+      }
+
+      supported = groundedNow;
+    }
+
+    // Sync visible root to collider position
+    localPlayer.root.position.copyFrom(collider.position);
   }
 
   // ── Camera follow ─────────────────────────────────────────────────────────
