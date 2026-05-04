@@ -1,16 +1,16 @@
 {
-  "_comment": "Configuration for map_2.gltf. Select this map with ?map=map_2 in the URL.",
-  "id": "map_2",
-  "file": "map_2.gltf",
+  "_comment": "Configuration for map_3.gltf. Select this map with ?map=map_3 in the URL.",
+  "id": "map_3",
+  "file": "maps/map_3.gltf",
   "scale": 0.5,
   "rotation": {
-    "x": -0.78539816339,
+    "x": 0,
     "y": 0,
     "z": 0
   },
   "position": {
     "x": 0,
-    "y": 0,
+    "y": -0.75,
     "z": -0.75
   },
   "spawn": {

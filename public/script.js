@@ -6,6 +6,8 @@
 
 "use strict";
 
+import { Renderer } from "./render.js";
+
 // ── Configs (loaded from JSON) ─────────────────────────────────────────────
 let charConfig = null;
 let mapConfig  = null;
@@ -59,7 +61,7 @@ async function loadMapConfigFromId() {
 
   if (mapIndex && Array.isArray(mapIndex.maps) && mapIndex.maps.length > 0) {
     const defaultMapId = mapIndex.defaultMapId || mapIndex.maps[0].id;
-    selectedMapId = requestedMapId || defaultMapId;
+      selectedMapId = requestedMapId || "map_1";
 
     let selectedMap = mapIndex.maps.find(m => m.id === selectedMapId);
     if (!selectedMap) {
@@ -81,21 +83,21 @@ async function loadMapConfigFromId() {
     return config;
   }
 
-  // Legacy fallback: use /assets/map.json when no maps index exists.
-  selectedMapId = requestedMapId || "map";
-  const legacyPath = selectedMapId === "map"
-    ? "/assets/map.json"
-    : `/assets/${selectedMapId}.json`;
+  // Legacy fallback: use /assets/maps/map_1.json when no maps index exists.
+    selectedMapId = requestedMapId || "map_1";
+    const legacyPath = selectedMapId === "map_1"
+      ? "/assets/maps/map_1.json"
+      : `/assets/${selectedMapId}.json`;
 
   try {
     const config = await fetchJSON(legacyPath);
     config.id = config.id || selectedMapId;
     return config;
   } catch (err) {
-    if (legacyPath !== "/assets/map.json") {
-      console.warn(`[Map] Failed to load '${legacyPath}', falling back to '/assets/map.json'.`);
-      selectedMapId = "map";
-      const config = await fetchJSON("/assets/map.json");
+    if (legacyPath !== "/assets/maps/map_1.json") {
+      console.warn(`[Map] Failed to load '${legacyPath}', falling back to '/assets/maps/map_1.json'.`);
+      selectedMapId = "map_1";
+      const config = await fetchJSON("/assets/maps/map_1.json");
       config.id = config.id || selectedMapId;
       return config;
     }
@@ -117,7 +119,7 @@ async function main() {
   try {
     Renderer.setLoadProgress(5, "Fetching configs…");
 
-    charConfig = await fetchJSON("/assets/BaseCharacter.json");
+    charConfig = await fetchJSON("/assets/characters/BaseCharacter.json");
     mapConfig = await loadMapConfigFromId();
     console.log(`[Map] Using map id: ${mapConfig.id}`);
 
@@ -211,6 +213,8 @@ function onFrame(dt) {
   const player = Renderer.getPlayer();
   if (!player) return;
 
+  const previousPosition = player.root.position.clone();
+
   const scene  = Renderer.getScene();
   const camera = Renderer.getCamera();
 
@@ -245,6 +249,8 @@ function onFrame(dt) {
     if (keys.d) { move.addInPlace(right); isMoving = true; }
   }
 
+  // Apply movement and gravity every frame. Movement XZ is computed above; vertical
+  // displacement is handled inside Renderer.moveLocalWithCollisions using scene gravity.
   if (isMoving) {
     const frameScale = Math.min(dt * 60, 2);
     move.normalize().scaleInPlace(speed * frameScale);
@@ -259,9 +265,12 @@ function onFrame(dt) {
     // Use turnSpeed from config, defaulting to 0.15
     const turnSpeed = charConfig.movement?.turnSpeed ?? 0.15;
     player.root.rotation.y += diff * turnSpeed;
-
-    Renderer.moveLocalWithCollisions(move);
   }
+
+  // Always call moveLocalWithCollisions so gravity is applied even when player isn't moving.
+  Renderer.moveLocalWithCollisions(move, dt);
+
+  updateVelocityReadout(player, previousPosition, dt);
 
   // ── Animation ─────────────────────────────────────────────────────────
   const animName = Renderer.updateLocalAnimation(isMoving, isRunning);
@@ -290,6 +299,12 @@ function setupInput() {
   const canvas = Renderer.getEngine().getRenderingCanvas();
 
   document.addEventListener("keydown", (e) => {
+    // Escape exits pointer lock
+    if (e.key === "Escape") {
+      document.exitPointerLock();
+      return;
+    }
+
     if (chatFocused) return;
     if (keys.hasOwnProperty(e.key)) { keys[e.key] = true; e.preventDefault(); }
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
@@ -304,6 +319,14 @@ function setupInput() {
     if (keys.hasOwnProperty(e.key)) keys[e.key] = false;
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
       keys[e.code] = false;
+    }
+  });
+
+  // Request pointer lock on canvas click
+  canvas.addEventListener("click", () => {
+    canvas.requestPointerLock = canvas.requestPointerLock || canvas.mozRequestPointerLock;
+    if (canvas.requestPointerLock) {
+      canvas.requestPointerLock();
     }
   });
 
@@ -409,6 +432,17 @@ function updateHUD() {
     const pn = document.getElementById("player-name");
     if (pn) pn.textContent = `Player_${selfId.slice(0, 4).toUpperCase()}`;
   }
+}
+
+function updateVelocityReadout(player, previousPosition, dt) {
+  const value = document.getElementById("velocity-value");
+  if (!value || !player || !previousPosition || dt <= 0) return;
+
+  const displacement = player.root.position.subtract(previousPosition);
+  const speed = displacement.length() / dt;
+  const verticalSpeed = displacement.y / dt;
+
+  value.textContent = `Speed ${Math.round(speed)} u/s · Y ${Math.round(verticalSpeed)} u/s`;
 }
 
 function updateOnlineCount(n) {

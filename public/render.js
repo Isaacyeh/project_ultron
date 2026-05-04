@@ -7,7 +7,9 @@
 
 "use strict";
 
-const Renderer = (() => {
+import { GRAVITY_Y, TERMINAL_VELOCITY } from "./variables.js";
+
+export const Renderer = (() => {
 
   // ── Private state ─────────────────────────────────────────────────────────
   let engine, scene, camera, shadowGenerator;
@@ -69,7 +71,7 @@ const Renderer = (() => {
 
     // Enable collisions system
     scene.collisionsEnabled = true;
-    scene.gravity = new BABYLON.Vector3(0, -0.5, 0);
+    scene.gravity = new BABYLON.Vector3(0, GRAVITY_Y, 0);
 
     window.addEventListener("resize", () => engine.resize());
     return { engine, scene };
@@ -138,8 +140,8 @@ const Renderer = (() => {
     return camera;
   }
 
-  // ── Load map.gltf ─────────────────────────────────────────────────────────
-  // Rotation is driven by map.json so each map can define its own orientation.
+  // ── Load map_1.gltf ────────────────────────────────────────────────────────
+  // Rotation is driven by map_1.json so each map can define its own orientation.
   // The map geometry is ~2.54 m across, so we scale it up to arena size.
   function loadMap(mapConfig) {
     setLoadProgress(20, "Loading map…");
@@ -154,7 +156,7 @@ const Renderer = (() => {
         function (meshes, _particleSystems, _skeletons, _animationGroups, _transformNodes, _geometries, rootNode) {
 
           if (!meshes || meshes.length === 0) {
-            return reject(new Error("map.gltf loaded but contained no meshes."));
+            return reject(new Error("map_1.gltf loaded but contained no meshes."));
           }
 
           // Scale factor: raw geometry is ~2.54 units wide; multiply to arena size
@@ -211,6 +213,7 @@ const Renderer = (() => {
             }
 
             m.checkCollisions = true;
+            m.isPickable = true;
             m.receiveShadows  = mapConfig.lighting?.receiveShadows ?? true;
             if (m.material) m.material.backFaceCulling = false;
             if (typeof m.freezeWorldMatrix === "function") m.freezeWorldMatrix();
@@ -230,7 +233,7 @@ const Renderer = (() => {
         function (scene, msg, ex) {
           const detail = (ex && ex.message) ? ex.message : String(msg ?? "unknown error");
           console.error("[Map] Load failed:", detail, ex);
-          reject(new Error("Failed to load map.gltf — " + detail));
+          reject(new Error("Failed to load map_1.gltf — " + detail));
         }
       );
     });
@@ -312,7 +315,10 @@ const Renderer = (() => {
             collider,
             animGroups,
             config: charConfig,
-            currentAnim: idleAnimName
+            currentAnim: idleAnimName,
+            // vertical velocity in world units/second (positive = up)
+            _velY: 0,
+            _grounded: true
           };
           setLoadProgress(85, "Character ready.");
           resolve(localPlayer);
@@ -447,25 +453,81 @@ const Renderer = (() => {
   }
 
   // ── Local collision movement ─────────────────────────────────────────────
-  function moveLocalWithCollisions(delta) {
+  // delta: horizontal movement (x,z) per-frame; dt: time delta in seconds
+  function moveLocalWithCollisions(delta, dt = 1 / 60) {
     if (!localPlayer || !localPlayer.collider) return;
 
-    const distance = delta.length();
-    if (distance === 0) {
-      localPlayer.root.position.copyFrom(localPlayer.collider.position);
-      return;
-    }
-
     const collider = localPlayer.collider;
-    const maxStep = 0.08;
-    const steps = Math.max(1, Math.ceil(distance / maxStep));
-    const step = delta.scale(1 / steps);
 
-    for (let i = 0; i < steps; i++) {
-      collider.moveWithCollisions(step);
+    // Ensure vertical velocity is present
+    if (typeof localPlayer._velY !== "number") localPlayer._velY = 0;
+
+    // Use fixed-size physics substeps so gravity feels consistent across varying frame times.
+    const safeDt = Math.max(0, Math.min(dt, 0.1));
+    const targetStepDt = 1 / 120;
+    const physicsSteps = Math.max(1, Math.ceil(safeDt / targetStepDt));
+    const subDt = safeDt / physicsSteps;
+    const horizontalPerStep = delta.scale(1 / physicsSteps);
+
+    const maxStep = 0.08;
+    const groundedEps = 1e-3;
+    const gravityY = scene?.gravity?.y ?? GRAVITY_Y;
+
+    let supported = localPlayer._grounded === true;
+
+    for (let i = 0; i < physicsSteps; i++) {
+      // Gravity is always integrated at the same acceleration; collision response
+      // determines whether downward motion is canceled by ground contact.
+      localPlayer._velY += gravityY * subDt;
+      if (localPlayer._velY < TERMINAL_VELOCITY) localPlayer._velY = TERMINAL_VELOCITY;
+
+      const horizontalStep = new BABYLON.Vector3(horizontalPerStep.x, 0, horizontalPerStep.z);
+      const horizontalDistance = horizontalStep.length();
+
+      if (horizontalDistance > 0) {
+        const horizontalSteps = Math.max(1, Math.ceil(horizontalDistance / maxStep));
+        const horizontalCollisionStep = horizontalStep.scale(1 / horizontalSteps);
+        const yBeforeHorizontal = collider.position.y;
+
+        for (let j = 0; j < horizontalSteps; j++) {
+          collider.moveWithCollisions(horizontalCollisionStep);
+        }
+
+        // In air, keep horizontal collision response from injecting extra vertical speed.
+        if (!supported) {
+          collider.position.y = yBeforeHorizontal;
+        }
+      }
+
+      const verticalStep = localPlayer._velY * subDt;
+      if (verticalStep !== 0) {
+        const verticalDistance = Math.abs(verticalStep);
+        const verticalSteps = Math.max(1, Math.ceil(verticalDistance / maxStep));
+        const verticalCollisionStep = new BABYLON.Vector3(0, verticalStep / verticalSteps, 0);
+
+        const yBeforeVertical = collider.position.y;
+
+        for (let j = 0; j < verticalSteps; j++) {
+          collider.moveWithCollisions(verticalCollisionStep);
+        }
+
+        const yAfterVertical = collider.position.y;
+        const verticalMoved = yAfterVertical - yBeforeVertical;
+        const groundedNow = verticalStep < 0 && verticalMoved > verticalStep + groundedEps;
+
+        // Landing: reset accumulated fall acceleration immediately.
+        if (groundedNow) {
+          localPlayer._velY = 0;
+        }
+
+        supported = groundedNow;
+      }
+
+      localPlayer._grounded = supported;
     }
 
-    localPlayer.root.position.copyFrom(localPlayer.collider.position);
+    // Sync visible root to collider position
+    localPlayer.root.position.copyFrom(collider.position);
   }
 
   // ── Camera follow ─────────────────────────────────────────────────────────

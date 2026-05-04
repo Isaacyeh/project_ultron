@@ -1,0 +1,28 @@
+{
+  "_comment": "Configuration for map_2.gltf. Select this map with ?map=map_2 in the URL.",
+  "id": "map_2",
+  "file": "maps/map_2.gltf",
+  "scale": 0.5,
+  "rotation": {
+    "x": -0.78539816339,
+    "y": 0,
+    "z": 0
+  },
+  "position": {
+    "x": 0,
+    "y": 0,
+    "z": -0.75
+  },
+  "spawn": {
+    "x": 0,
+    "y": 0,
+    "z": 0
+  },
+  "collision": {
+    "flipFaces": true
+  },
+  "lighting": {
+    "receiveShadows": true,
+    "castShadows": false
+  }
+}
