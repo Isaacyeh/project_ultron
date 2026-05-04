@@ -317,7 +317,8 @@ export const Renderer = (() => {
             config: charConfig,
             currentAnim: idleAnimName,
             // vertical velocity in world units/second (positive = up)
-            _velY: 0
+            _velY: 0,
+            _grounded: true
           };
           setLoadProgress(85, "Character ready.");
           resolve(localPlayer);
@@ -470,65 +471,59 @@ export const Renderer = (() => {
 
     const maxStep = 0.08;
     const groundedEps = 1e-3;
-    const groundProbe = 0.08;
     const gravityY = scene?.gravity?.y ?? GRAVITY_Y;
 
-    function isGrounded() {
-      if (!scene) return false;
-      const origin = collider.position.add(new BABYLON.Vector3(0, 0.02, 0));
-      const ray = new BABYLON.Ray(origin, BABYLON.Vector3.Down(), groundProbe + 0.02);
-      const pick = scene.pickWithRay(ray, (mesh) => {
-        if (!mesh || !mesh.isEnabled()) return false;
-        if (mesh === collider) return false;
-
-        // Ignore local player visuals/collider hierarchy.
-        let parent = mesh;
-        while (parent) {
-          if (parent === localPlayer.root || parent === collider) return false;
-          parent = parent.parent;
-        }
-        return mesh.checkCollisions === true;
-      });
-
-      return !!(pick && pick.hit && pick.distance <= groundProbe + groundedEps);
-    }
-
-    let supported = isGrounded();
+    let supported = localPlayer._grounded === true;
 
     for (let i = 0; i < physicsSteps; i++) {
-      // Gravity acceleration is active only while airborne.
-      if (!supported) {
-        localPlayer._velY += gravityY * subDt;
-        if (localPlayer._velY < TERMINAL_VELOCITY) localPlayer._velY = TERMINAL_VELOCITY;
-      } else {
-        localPlayer._velY = 0;
+      // Gravity is always integrated at the same acceleration; collision response
+      // determines whether downward motion is canceled by ground contact.
+      localPlayer._velY += gravityY * subDt;
+      if (localPlayer._velY < TERMINAL_VELOCITY) localPlayer._velY = TERMINAL_VELOCITY;
+
+      const horizontalStep = new BABYLON.Vector3(horizontalPerStep.x, 0, horizontalPerStep.z);
+      const horizontalDistance = horizontalStep.length();
+
+      if (horizontalDistance > 0) {
+        const horizontalSteps = Math.max(1, Math.ceil(horizontalDistance / maxStep));
+        const horizontalCollisionStep = horizontalStep.scale(1 / horizontalSteps);
+        const yBeforeHorizontal = collider.position.y;
+
+        for (let j = 0; j < horizontalSteps; j++) {
+          collider.moveWithCollisions(horizontalCollisionStep);
+        }
+
+        // In air, keep horizontal collision response from injecting extra vertical speed.
+        if (!supported) {
+          collider.position.y = yBeforeHorizontal;
+        }
       }
 
       const verticalStep = localPlayer._velY * subDt;
-      const fullStep = new BABYLON.Vector3(
-        horizontalPerStep.x,
-        verticalStep,
-        horizontalPerStep.z
-      );
+      if (verticalStep !== 0) {
+        const verticalDistance = Math.abs(verticalStep);
+        const verticalSteps = Math.max(1, Math.ceil(verticalDistance / maxStep));
+        const verticalCollisionStep = new BABYLON.Vector3(0, verticalStep / verticalSteps, 0);
 
-      const distance = fullStep.length();
-      if (distance === 0) continue;
+        const yBeforeVertical = collider.position.y;
 
-      const collisionSteps = Math.max(1, Math.ceil(distance / maxStep));
-      const collisionStep = fullStep.scale(1 / collisionSteps);
+        for (let j = 0; j < verticalSteps; j++) {
+          collider.moveWithCollisions(verticalCollisionStep);
+        }
 
-      for (let j = 0; j < collisionSteps; j++) {
-        collider.moveWithCollisions(collisionStep);
+        const yAfterVertical = collider.position.y;
+        const verticalMoved = yAfterVertical - yBeforeVertical;
+        const groundedNow = verticalStep < 0 && verticalMoved > verticalStep + groundedEps;
+
+        // Landing: reset accumulated fall acceleration immediately.
+        if (groundedNow) {
+          localPlayer._velY = 0;
+        }
+
+        supported = groundedNow;
       }
 
-      const groundedNow = isGrounded();
-
-      // Landing: reset accumulated fall acceleration immediately.
-      if (groundedNow && !supported) {
-        localPlayer._velY = 0;
-      }
-
-      supported = groundedNow;
+      localPlayer._grounded = supported;
     }
 
     // Sync visible root to collider position

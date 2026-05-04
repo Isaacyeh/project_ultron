@@ -67,6 +67,26 @@ body {
   min-width: 180px;
 }
 
+#velocity-readout {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 2px;
+}
+
+.stat-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+}
+
+#velocity-value {
+  font-size: 11px;
+  color: var(--text);
+  letter-spacing: 0.02em;
+}
+
 #player-name {
   font-size: 11px;
   text-transform: uppercase;

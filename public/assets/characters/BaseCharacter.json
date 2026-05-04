@@ -28,8 +28,8 @@
   "animationBlendSpeed": 0.15,
 
   "movement": {
-    "walkSpeed":  0.10,
-    "runSpeed":   0.20,
+    "walkSpeed":  0.15,
+    "runSpeed":   0.30,
     "turnSpeed":  0.25
   },
 

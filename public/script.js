@@ -213,6 +213,8 @@ function onFrame(dt) {
   const player = Renderer.getPlayer();
   if (!player) return;
 
+  const previousPosition = player.root.position.clone();
+
   const scene  = Renderer.getScene();
   const camera = Renderer.getCamera();
 
@@ -267,6 +269,8 @@ function onFrame(dt) {
 
   // Always call moveLocalWithCollisions so gravity is applied even when player isn't moving.
   Renderer.moveLocalWithCollisions(move, dt);
+
+  updateVelocityReadout(player, previousPosition, dt);
 
   // ── Animation ─────────────────────────────────────────────────────────
   const animName = Renderer.updateLocalAnimation(isMoving, isRunning);
@@ -428,6 +432,17 @@ function updateHUD() {
     const pn = document.getElementById("player-name");
     if (pn) pn.textContent = `Player_${selfId.slice(0, 4).toUpperCase()}`;
   }
+}
+
+function updateVelocityReadout(player, previousPosition, dt) {
+  const value = document.getElementById("velocity-value");
+  if (!value || !player || !previousPosition || dt <= 0) return;
+
+  const displacement = player.root.position.subtract(previousPosition);
+  const speed = displacement.length() / dt;
+  const verticalSpeed = displacement.y / dt;
+
+  value.textContent = `Speed ${Math.round(speed)} u/s · Y ${Math.round(verticalSpeed)} u/s`;
 }
 
 function updateOnlineCount(n) {
