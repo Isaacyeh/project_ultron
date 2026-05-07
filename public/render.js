@@ -15,6 +15,7 @@ export const Renderer = (() => {
   let engine, scene, camera, shadowGenerator;
   let localPlayer = null;       // { root, collider, animGroups, config, currentAnim }
   const remotePlayers = {};     // id → { root, animGroups, nameTag, currentAnim }
+  const DEFAULT_CHARACTER_COLLISION = { radius: 0.4, height: 1.8 };
 
   // ── Animation helpers ─────────────────────────────────────────────────────
   function playAnim(animGroups, name, loop = true) {
@@ -43,6 +44,108 @@ export const Renderer = (() => {
     if (!ls) return;
     ls.classList.add("hidden");
     setTimeout(() => { if (ls.parentNode) ls.parentNode.removeChild(ls); }, 700);
+  }
+
+  function sanitizeCollision(collision) {
+    const radius = Number(collision?.radius);
+    const height = Number(collision?.height);
+
+    return {
+      radius: Number.isFinite(radius) && radius > 0 ? radius : DEFAULT_CHARACTER_COLLISION.radius,
+      height: Number.isFinite(height) && height > 0 ? height : DEFAULT_CHARACTER_COLLISION.height
+    };
+  }
+
+  function getRealMeshes(meshes) {
+    return (meshes || []).filter(m => typeof m?.getTotalVertices === "function" ? m.getTotalVertices() > 0 : true);
+  }
+
+  function getHierarchyBounds(meshes) {
+    const realMeshes = getRealMeshes(meshes);
+    if (!realMeshes.length) return null;
+
+    let min = null;
+    let max = null;
+
+    realMeshes.forEach(mesh => {
+      try {
+        mesh.computeWorldMatrix(true);
+      } catch (_) {
+        // Ignore individual mesh failures and continue with the rest.
+      }
+
+      const info = mesh.getBoundingInfo ? mesh.getBoundingInfo() : null;
+      const box = info?.boundingBox;
+      const minimum = box?.minimumWorld;
+      const maximum = box?.maximumWorld;
+
+      if (!minimum || !maximum) return;
+
+      min = min
+        ? BABYLON.Vector3.Minimize(min, minimum)
+        : minimum.clone();
+      max = max
+        ? BABYLON.Vector3.Maximize(max, maximum)
+        : maximum.clone();
+    });
+
+    return min && max ? { min, max } : null;
+  }
+
+  function buildCharacterCollision(meshes, fallbackCollision) {
+    const bounds = getHierarchyBounds(meshes);
+    if (!bounds) return sanitizeCollision(fallbackCollision);
+
+    const width = Math.max(0.1, bounds.max.x - bounds.min.x);
+    const depth = Math.max(0.1, bounds.max.z - bounds.min.z);
+    const height = Math.max(0.1, bounds.max.y - bounds.min.y);
+
+    return sanitizeCollision({
+      radius: Math.max(width, depth) * 0.5,
+      height
+    });
+  }
+
+  function getCharacterVisualOffset(meshes) {
+    const bounds = getHierarchyBounds(meshes);
+    if (!bounds) return BABYLON.Vector3.Zero();
+
+    const centerX = (bounds.min.x + bounds.max.x) * 0.5;
+    const centerZ = (bounds.min.z + bounds.max.z) * 0.5;
+
+    return new BABYLON.Vector3(-centerX, -bounds.min.y, -centerZ);
+  }
+
+  function createCharacterCollider(name, collision) {
+    const shape = sanitizeCollision(collision);
+    const collider = BABYLON.MeshBuilder.CreateBox(
+      name,
+      { width: shape.radius * 2, depth: shape.radius * 2, height: shape.height },
+      scene
+    );
+
+    collider.isVisible = false;
+    collider.isPickable = false;
+    collider.checkCollisions = true;
+    collider.ellipsoid = new BABYLON.Vector3(shape.radius, shape.height / 2, shape.radius);
+    collider.ellipsoidOffset = new BABYLON.Vector3(0, shape.height / 2, 0);
+
+    return collider;
+  }
+
+  function attachCharacterMeshes(meshes, visualRoot, isRemote = false) {
+    getRealMeshes(meshes).forEach(mesh => {
+      mesh.parent = visualRoot;
+      if (mesh.getTotalVertices && mesh.getTotalVertices() > 0) {
+        if (!isRemote) {
+          shadowGenerator.addShadowCaster(mesh, true);
+        }
+        mesh.receiveShadows = true;
+      }
+      if (mesh.material) {
+        mesh.material.backFaceCulling = !isRemote;
+      }
+    });
   }
 
   // ── Engine & Scene ────────────────────────────────────────────────────────
@@ -260,40 +363,31 @@ export const Renderer = (() => {
           const root = new BABYLON.TransformNode("localPlayer", scene);
           const visualRoot = new BABYLON.TransformNode("localPlayerVisual", scene);
           visualRoot.parent = root;
-          visualRoot.rotation.y = charConfig.modelYawOffset ?? 0;
+          // Model assets sometimes export facing the opposite direction; apply
+          // a 180° correction so the visible model faces the same way the
+          // logical player root is oriented and moves.
+          visualRoot.rotation.y = (charConfig.modelYawOffset ?? 0) + Math.PI;
+          const s = charConfig.scale ?? 1;
+          visualRoot.scaling = new BABYLON.Vector3(s, s, s);
+
+          // Parent all loaded meshes to the transform node so model swaps keep
+          // the collision logic and visible model aligned.
+          attachCharacterMeshes(meshes, visualRoot, false);
+
+          // Keep the visible model grounded at the logical player root.
+          visualRoot.position = getCharacterVisualOffset(meshes);
+
           root.position = new BABYLON.Vector3(
             (spawnPos?.x ?? 0) + (charConfig.spawnOffset?.x ?? 0),
             (spawnPos?.y ?? 0) + (charConfig.spawnOffset?.y ?? 0),
             (spawnPos?.z ?? 0) + (charConfig.spawnOffset?.z ?? 0)
           );
 
-          // Parent all loaded meshes to the transform node
-          meshes[0].parent = visualRoot;
-          const s = charConfig.scale ?? 1;
-          meshes[0].scaling = new BABYLON.Vector3(s, s, s);
-
-          // Add to shadow casters
-          meshes.forEach(m => {
-            if (m.getTotalVertices && m.getTotalVertices() > 0) {
-              shadowGenerator.addShadowCaster(m, true);
-              m.receiveShadows = true;
-            }
-          });
+          const collision = buildCharacterCollision(meshes, charConfig.collision);
 
           // Create a hidden collider that participates in scene collisions.
           // The visible GLTF hierarchy stays parented under `root`.
-          const col = charConfig.collision ?? { radius: 0.4, height: 1.8 };
-          const colliderHalfHeight = col.height / 2;
-          const collider = BABYLON.MeshBuilder.CreateBox(
-            "localPlayerCollider",
-            { width: col.radius * 2, depth: col.radius * 2, height: col.height },
-            scene
-          );
-          collider.isVisible = false;
-          collider.isPickable = false;
-          collider.checkCollisions = true;
-          collider.ellipsoid = new BABYLON.Vector3(col.radius, colliderHalfHeight, col.radius);
-          collider.ellipsoidOffset = new BABYLON.Vector3(0, colliderHalfHeight, 0);
+          const collider = createCharacterCollider("localPlayerCollider", collision);
           collider.position = new BABYLON.Vector3(
             root.position.x,
             root.position.y,
@@ -312,9 +406,12 @@ export const Renderer = (() => {
 
           localPlayer = {
             root,
+            visualRoot,
             collider,
             animGroups,
             config: charConfig,
+            collision,
+            lastAppliedCorrectionVersion: 0,
             currentAnim: idleAnimName,
             // vertical velocity in world units/second (positive = up)
             _velY: 0,
@@ -341,7 +438,7 @@ export const Renderer = (() => {
   }
 
   // ── Load remote player ────────────────────────────────────────────────────
-  function addRemotePlayer(id, charConfig, spawnPos) {
+  function addRemotePlayer(id, charConfig, spawnPos, collisionFromServer) {
     return new Promise((resolve) => {
       BABYLON.SceneLoader.ImportMesh(
         "", "/assets/", charConfig.file, scene,
@@ -352,28 +449,34 @@ export const Renderer = (() => {
           const root = new BABYLON.TransformNode("remote_" + id, scene);
           const visualRoot = new BABYLON.TransformNode("remote_" + id + "_visual", scene);
           visualRoot.parent = root;
-          visualRoot.rotation.y = charConfig.modelYawOffset ?? 0;
+          // Apply the same 180° correction for remote visuals so everyone
+          // sees models oriented consistently.
+          visualRoot.rotation.y = (charConfig.modelYawOffset ?? 0) + Math.PI;
+          const s = charConfig.scale ?? 1;
+          visualRoot.scaling = new BABYLON.Vector3(s, s, s);
+
+          attachCharacterMeshes(meshes, visualRoot, true);
+          visualRoot.position = getCharacterVisualOffset(meshes);
+
           root.position = new BABYLON.Vector3(
             spawnPos?.x ?? 0, spawnPos?.y ?? 0, spawnPos?.z ?? 0
           );
 
-          // Parent all loaded meshes to the transform node
-          meshes[0].parent = visualRoot;
-          const s = charConfig.scale ?? 1;
-          meshes[0].scaling = new BABYLON.Vector3(s, s, s);
-
-          meshes.forEach(m => {
-            if (m.getTotalVertices && m.getTotalVertices() > 0) {
-              m.receiveShadows = true;
-            }
-            if (m.material) m.material.backFaceCulling = true;
-          });
+          const collision = sanitizeCollision(
+            collisionFromServer || buildCharacterCollision(meshes, charConfig.collision)
+          );
+          const collider = createCharacterCollider("remote_" + id + "_collider", collision);
+          collider.position = new BABYLON.Vector3(
+            root.position.x,
+            root.position.y,
+            root.position.z
+          );
 
           const idleAnimName = charConfig.animations?.idle ?? "Idle";
           playAnim(animGroups, idleAnimName, true);
 
           const nameTag = makeNameTag("P_" + id.slice(0, 6), root);
-          remotePlayers[id] = { root, animGroups, nameTag, currentAnim: idleAnimName };
+          remotePlayers[id] = { root, visualRoot, collider, animGroups, nameTag, currentAnim: idleAnimName, collision };
           resolve(remotePlayers[id]);
         }
       );
@@ -409,20 +512,30 @@ export const Renderer = (() => {
     const rp = remotePlayers[id];
     if (!rp) return;
     try { rp.root.dispose(); }     catch (_) {}
+    try { if (rp.collider) rp.collider.dispose(); } catch (_) {}
     try { if (rp.nameTag) rp.nameTag.dispose(); } catch (_) {}
     delete remotePlayers[id];
   }
 
   // ── Update remote player ──────────────────────────────────────────────────
-  function updateRemotePlayer(id, position, rotation, animName) {
+  function updateRemotePlayer(id, position, rotation, animName, collision) {
     const rp = remotePlayers[id];
     if (!rp) return;
 
-    rp.root.position = BABYLON.Vector3.Lerp(
+    if (collision) {
+      rp.collision = sanitizeCollision(collision);
+    }
+
+    const nextPosition = BABYLON.Vector3.Lerp(
       rp.root.position,
       new BABYLON.Vector3(position.x, position.y, position.z),
       0.2
     );
+    rp.root.position = nextPosition;
+    if (rp.collider) {
+      rp.collider.position.copyFrom(nextPosition);
+      rp.collider.rotation.y = rotation;
+    }
     
     // Smooth rotation towards target rotation
     let diff = rotation - rp.root.rotation.y;
@@ -434,6 +547,58 @@ export const Renderer = (() => {
     if (animName && animName !== rp.currentAnim) {
       rp.currentAnim = animName;
       playAnim(rp.animGroups, animName, true);
+    }
+  }
+
+  function setLocalPlayerState(position, rotation, collision, correctionVersion) {
+    if (!localPlayer) return;
+
+    if (typeof correctionVersion === "number") {
+      if (typeof localPlayer.lastAppliedCorrectionVersion === "number" &&
+          correctionVersion <= localPlayer.lastAppliedCorrectionVersion) {
+        return;
+      }
+      localPlayer.lastAppliedCorrectionVersion = correctionVersion;
+    }
+
+    if (collision) {
+      localPlayer.collision = sanitizeCollision(collision);
+    }
+
+    const nextPosition = new BABYLON.Vector3(position.x, position.y, position.z);
+    const collider = localPlayer.collider;
+
+    if (collider) {
+      const dist = BABYLON.Vector3.Distance(collider.position, nextPosition);
+
+      // Snap only when server correction is clearly large; otherwise blend in
+      // to avoid visible jitter while still respecting authoritative collisions.
+      if (dist > 1.0) {
+        collider.position.copyFrom(nextPosition);
+      } else if (dist > 0.03) {
+        collider.position = BABYLON.Vector3.Lerp(collider.position, nextPosition, 0.35);
+      }
+
+      if (typeof rotation === "number") {
+        let diff = rotation - localPlayer.root.rotation.y;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+
+        const nextRot = Math.abs(diff) > 1.0
+          ? rotation
+          : localPlayer.root.rotation.y + diff * 0.35;
+
+        localPlayer.root.rotation.y = nextRot;
+        collider.rotation.y = nextRot;
+      }
+
+      localPlayer.root.position.copyFrom(collider.position);
+      return;
+    }
+
+    localPlayer.root.position.copyFrom(nextPosition);
+    if (typeof rotation === "number") {
+      localPlayer.root.rotation.y = rotation;
     }
   }
 
@@ -528,6 +693,9 @@ export const Renderer = (() => {
 
     // Sync visible root to collider position
     localPlayer.root.position.copyFrom(collider.position);
+    if (localPlayer.collider) {
+      localPlayer.collider.rotation.y = localPlayer.root.rotation.y;
+    }
   }
 
   // ── Camera follow ─────────────────────────────────────────────────────────
@@ -558,6 +726,7 @@ export const Renderer = (() => {
     addRemotePlayer,
     removeRemotePlayer,
     updateRemotePlayer,
+    setLocalPlayerState,
     updateLocalAnimation,
     moveLocalWithCollisions,
     updateCameraTarget,

@@ -171,7 +171,7 @@ function connectSocket() {
     // Init: we receive our own state + all existing players
     socket.on("init", async ({ self, players }) => {
       for (const p of players) {
-        await Renderer.addRemotePlayer(p.id, charConfig, p.position);
+        await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
       }
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
       resolve();
@@ -179,7 +179,7 @@ function connectSocket() {
 
     socket.on("playerJoined", async (p) => {
       addSystemMsg(`${p.name} joined.`);
-      await Renderer.addRemotePlayer(p.id, charConfig, p.position);
+      await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
     });
 
@@ -189,14 +189,21 @@ function connectSocket() {
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
     });
 
-    socket.on("playerUpdated", ({ id, position, rotation, animation }) => {
-      Renderer.updateRemotePlayer(id, position, rotation, animation);
+    socket.on("playerUpdated", ({ id, position, rotation, animation, collision, correctionVersion }) => {
+      if (id === selfId) {
+        Renderer.setLocalPlayerState(position, rotation, collision, correctionVersion);
+        return;
+      }
+      Renderer.updateRemotePlayer(id, position, rotation, animation, collision);
     });
 
     socket.on("worldState", ({ players }) => {
       players.forEach(p => {
-        if (p.id === selfId) return;
-        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation);
+        if (p.id === selfId) {
+          Renderer.setLocalPlayerState(p.position, p.rotation, p.collision, p.correctionVersion);
+          return;
+        }
+        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.collision);
       });
     });
 
@@ -289,7 +296,8 @@ function onFrame(dt) {
         z: player.root.position.z
       },
       rotation:  player.root.rotation.y,
-      animation: animName
+      animation: animName,
+      collision: player.collision
     });
   }
 }
