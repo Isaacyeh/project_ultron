@@ -31,6 +31,145 @@ export const Renderer = (() => {
     });
   }
 
+  // ── Sword loading and positioning ──────────────────────────────────────
+  function loadSwordModel(player) {
+    return new Promise(async (resolve, reject) => {
+      if (player.sword) {
+        return resolve(player.sword);
+      }
+
+      // Try to load optional JSON config for the sword (orientation, offsets, bone name)
+      let cfg = {
+        file: "weapons/Katana Sword.glb",
+        attachBone: "RightHand",
+        hiltOffset: { x: 0.35, y: 1.5, z: 0.2 },
+        hiltRotation: { x: 0.15, y: 0, z: 0 }
+      };
+
+      try {
+        const r = await fetch("/assets/weapons/Katana Sword.json");
+        if (r.ok) {
+          const userCfg = await r.json();
+          cfg = Object.assign(cfg, userCfg);
+        }
+      } catch (e) {
+        // Ignore missing config — use defaults above
+      }
+
+      BABYLON.SceneLoader.ImportMesh(
+        "",
+        "/assets/",
+        cfg.file,
+        scene,
+        function (meshes, _ps, _sk, _ag) {
+          if (!meshes || meshes.length === 0) {
+            return reject(new Error("Failed to load sword model"));
+          }
+
+          // Create a parent transform for the sword meshes
+          const swordRoot = new BABYLON.TransformNode("swordRoot", scene);
+          // Apply scale from config (default 1)
+          const s = typeof cfg.scale === 'number' ? cfg.scale : 1.0;
+          swordRoot.scaling = new BABYLON.Vector3(s, s, s);
+
+          // Parent all sword meshes to the root
+          meshes.forEach(mesh => {
+            mesh.parent = swordRoot;
+            if (mesh.getTotalVertices && mesh.getTotalVertices() > 0) {
+              try { shadowGenerator.addShadowCaster(mesh, true); } catch (_) {}
+              mesh.receiveShadows = true;
+            }
+          });
+
+          // Create a pivot mesh that will be attached to the bone if possible
+          const pivot = new BABYLON.Mesh("swordPivot", scene);
+          pivot.isVisible = false;
+
+          // Default: parent pivot to visualRoot (local space)
+          pivot.parent = player.visualRoot;
+
+          // If we have a skinned mesh and a bone name, attach pivot to that bone
+          if (player.skinnedMesh && player.skinnedMesh.skeleton && cfg.attachBone) {
+            const bone = player.skinnedMesh.skeleton.bones.find(b => b.name === cfg.attachBone);
+            if (bone) {
+              try {
+                pivot.attachToBone(bone, player.skinnedMesh);
+                // When attached to bone, keep swordRoot parented to pivot so it follows bone
+                swordRoot.parent = pivot;
+                player.sword = { root: swordRoot, meshes: meshes, pivotAttached: true, pivot };
+                // Apply local offsets/rotation
+                swordRoot.position = new BABYLON.Vector3(cfg.hiltOffset.x, cfg.hiltOffset.y, cfg.hiltOffset.z);
+                swordRoot.rotation = new BABYLON.Vector3(cfg.hiltRotation.x, cfg.hiltRotation.y, cfg.hiltRotation.z);
+                return resolve(player.sword);
+              } catch (e) {
+                console.warn("[Sword] Could not attach to bone, falling back to visualRoot", e);
+              }
+            }
+          }
+
+          // Fallback: parent swordRoot to visualRoot and set local transform
+          swordRoot.parent = player.visualRoot;
+          swordRoot.position = new BABYLON.Vector3(cfg.hiltOffset.x, cfg.hiltOffset.y, cfg.hiltOffset.z);
+          swordRoot.rotation = new BABYLON.Vector3(cfg.hiltRotation.x, cfg.hiltRotation.y, cfg.hiltRotation.z);
+
+          player.sword = { root: swordRoot, meshes: meshes, pivotAttached: false };
+          resolve(player.sword);
+        },
+        function (evt) {
+          // Progress — ignored
+        },
+        function (sceneErr, msg, ex) {
+          const detail = (ex && ex.message) ? ex.message : String(msg ?? "unknown error");
+          console.error("[Sword] Load failed:", detail);
+          reject(new Error("Failed to load sword — " + detail));
+        }
+      );
+    });
+  }
+
+  function updateSwordPosition(player) {
+    if (!player.sword || !player.sword.root) return;
+
+    // If sword is attached to a bone pivot we don't need to update world position
+    if (player.sword.pivotAttached) return;
+
+    const swordRoot = player.sword.root;
+
+    // Local offsets (if not attached to bone) — tweak via JSON config
+    const handOffsetLocal = new BABYLON.Vector3(0.35, 1.5, 0.2);
+    swordRoot.position.copyFrom(handOffsetLocal);
+    swordRoot.rotation.x = 0.15;
+    swordRoot.rotation.y = 0;
+    swordRoot.rotation.z = 0;
+  }
+
+  // ── Sword equipment ───────────────────────────────────────────────────────
+  async function equipSword(player) {
+    if (!player) return;
+    try {
+      await loadSwordModel(player);
+      // Position the sword immediately when not attached to bone
+      if (player.sword && !player.sword.pivotAttached) updateSwordPosition(player);
+    } catch (err) {
+      console.error("[Sword] Failed to equip:", err);
+    }
+  }
+
+  function unequipSword(player) {
+    if (!player || !player.sword) return;
+    try {
+      if (player.sword.root) {
+        player.sword.root.dispose();
+      }
+      player.sword.meshes?.forEach(m => {
+        try { m.dispose(); } catch (_) {}
+      });
+      player.sword = null;
+    } catch (err) {
+      console.error("[Sword] Failed to unequip:", err);
+    }
+  }
+
   // ── Loading bar ───────────────────────────────────────────────────────────
   function setLoadProgress(pct, msg) {
     const bar = document.getElementById("loading-bar");
@@ -353,7 +492,7 @@ export const Renderer = (() => {
         charConfig.file,
         scene,
         // onSuccess
-        function (meshes, _ps, _sk, animGroups) {
+        function (meshes, _ps, skeletons, animGroups) {
 
           if (!meshes || meshes.length === 0) {
             return reject(new Error("Character GLTF returned no meshes."));
@@ -404,6 +543,9 @@ export const Renderer = (() => {
             root.position.add(new BABYLON.Vector3(0, heightOffset, 0))
           );
 
+          // Find skinned mesh (the mesh that contains a skeleton) for bone attachment
+          const skinnedMesh = (meshes || []).find(m => m.skeleton) || null;
+
           localPlayer = {
             root,
             visualRoot,
@@ -417,6 +559,9 @@ export const Renderer = (() => {
             _velY: 0,
             _grounded: true
           };
+          // Store skeletons/skinned mesh for later attachment
+          localPlayer.skeletons = skeletons || null;
+          localPlayer.skinnedMesh = skinnedMesh;
           setLoadProgress(85, "Character ready.");
           resolve(localPlayer);
         },
@@ -734,6 +879,9 @@ export const Renderer = (() => {
     setLoadProgress,
     hideLoadingScreen,
     playAnim,
+    equipSword,
+    unequipSword,
+    updateSwordPosition,
 
     getScene:   () => scene,
     getCamera:  () => camera,

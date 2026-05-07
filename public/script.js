@@ -31,6 +31,12 @@ let selfId       = null;
 const SEND_RATE  = 50; // ms between network sends
 let lastSend     = 0;
 
+// ── Sword state ────────────────────────────────────────────────────────────
+let swordEquipped = false;
+let isAttacking = false;
+let attackCooldown = 0;
+const ATTACK_COOLDOWN = 0.6; // seconds between attacks
+
 // ── Movement ───────────────────────────────────────────────────────────────
 const WALK_SPEED = 1;
 const RUN_SPEED  = 2;
@@ -225,6 +231,24 @@ function onFrame(dt) {
   const scene  = Renderer.getScene();
   const camera = Renderer.getCamera();
 
+  // ── Update sword state ─────────────────────────────────────────────────
+  if (swordEquipped && player.sword) {
+    Renderer.updateSwordPosition(player);
+  }
+
+  // ── Attack cooldown and state ──────────────────────────────────────────
+  if (attackCooldown > 0) {
+    attackCooldown -= dt;
+  }
+
+  // Check if attack animation has finished
+  if (isAttacking && player.animGroups) {
+    const punchAnim = player.animGroups.find(ag => ag.name === "Punch");
+    if (punchAnim && !punchAnim.isPlaying) {
+      isAttacking = false;
+    }
+  }
+
   // ── Arrow key camera rotation ──────────────────────────────────────────
   if (!chatFocused) {
     if (keys.ArrowLeft)  camera.alpha -= CAM_KEY_ROT_SPEED;
@@ -280,7 +304,11 @@ function onFrame(dt) {
   updateVelocityReadout(player, previousPosition, dt);
 
   // ── Animation ─────────────────────────────────────────────────────────
-  const animName = Renderer.updateLocalAnimation(isMoving, isRunning);
+  // Don't update base animation if attacking (attack animation takes priority)
+  let animName = player.currentAnim;
+  if (!isAttacking) {
+    animName = Renderer.updateLocalAnimation(isMoving, isRunning);
+  }
 
   // ── Camera follow ──────────────────────────────────────────────────────
   Renderer.updateCameraTarget();
@@ -313,6 +341,21 @@ function setupInput() {
       return;
     }
 
+    // Handle "1" key for sword equip/unequip
+    if (e.key === "1" && !chatFocused) {
+      swordEquipped = !swordEquipped;
+      const player = Renderer.getPlayer();
+      if (player) {
+        if (swordEquipped) {
+          Renderer.equipSword(player);
+        } else {
+          Renderer.unequipSword(player);
+        }
+      }
+      e.preventDefault();
+      return;
+    }
+
     if (chatFocused) return;
     if (keys.hasOwnProperty(e.key)) { keys[e.key] = true; e.preventDefault(); }
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
@@ -338,9 +381,32 @@ function setupInput() {
     }
   });
 
-  // Mouse drag for camera rotation
+  // Mouse drag for camera rotation and attacks
   canvas.addEventListener("mousedown", (e) => {
-    if (e.button === 2 || e.button === 0) {
+    if (e.button === 0) {
+      // Left click: perform sword attack if equipped and not on cooldown
+      if (swordEquipped && !isAttacking && attackCooldown <= 0) {
+        isAttacking = true;
+        attackCooldown = ATTACK_COOLDOWN;
+        const player = Renderer.getPlayer();
+        if (player) {
+          // Prefer "SwordSlash" animation if available, fall back to "Punch"
+          const preferred = (player.config.animations && player.config.animations.swordSlash) ? player.config.animations.swordSlash : "SwordSlash";
+          const hasSwordSlash = player.animGroups && player.animGroups.some(ag => ag.name === preferred);
+          const fallback = player.animGroups && player.animGroups.some(ag => ag.name === "Punch");
+          if (hasSwordSlash) {
+            Renderer.playAnim(player.animGroups, preferred, false);
+          } else if (fallback) {
+            Renderer.playAnim(player.animGroups, "Punch", false);
+          } else {
+            // As a last resort, stop updating animations briefly
+          }
+        }
+      }
+      mouseDown = true;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+    } else if (e.button === 2) {
       mouseDown = true;
       lastMouseX = e.clientX;
       lastMouseY = e.clientY;
