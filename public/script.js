@@ -11,6 +11,7 @@ import { Renderer } from "./render.js";
 // ── Configs (loaded from JSON) ─────────────────────────────────────────────
 let charConfig = null;
 let mapConfig  = null;
+let selectedCharacterId = null;
 let selectedMapId = null;
 
 // ── Input state ────────────────────────────────────────────────────────────
@@ -53,6 +54,66 @@ async function fetchJSON(url) {
 function pickMapIdFromURL() {
   const params = new URLSearchParams(window.location.search);
   return params.get("map") || params.get("mapId") || null;
+}
+
+function pickCharacterIdFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("character") || params.get("characterId") || null;
+}
+
+async function loadCharacterConfigFromId() {
+  const requestedCharacterId = pickCharacterIdFromURL();
+
+  let characterIndex = null;
+  try {
+    characterIndex = await fetchJSON("/assets/characters.json");
+  } catch (_err) {
+    // Fallback for projects that only have a single character config.
+  }
+
+  if (characterIndex && Array.isArray(characterIndex.characters) && characterIndex.characters.length > 0) {
+    const defaultCharacterId = characterIndex.defaultCharacterId || characterIndex.characters[0].id;
+    selectedCharacterId = requestedCharacterId || defaultCharacterId;
+
+    let selectedCharacter = characterIndex.characters.find(c => c.id === selectedCharacterId);
+    if (!selectedCharacter) {
+      console.warn(`[Character] Unknown character id '${selectedCharacterId}', falling back to '${defaultCharacterId}'.`);
+      selectedCharacterId = defaultCharacterId;
+      selectedCharacter = characterIndex.characters.find(c => c.id === selectedCharacterId);
+    }
+
+    if (!selectedCharacter || !selectedCharacter.config) {
+      throw new Error("characters.json is missing a valid character entry with a config path.");
+    }
+
+    const characterPath = selectedCharacter.config.startsWith("/")
+      ? selectedCharacter.config
+      : `/assets/${selectedCharacter.config}`;
+
+    const config = await fetchJSON(characterPath);
+    config.id = config.id || selectedCharacterId;
+    return config;
+  }
+
+  selectedCharacterId = requestedCharacterId || "base";
+  const legacyPath = selectedCharacterId === "base"
+    ? "/assets/characters/BaseCharacter.json"
+    : `/assets/characters/${selectedCharacterId}.json`;
+
+  try {
+    const config = await fetchJSON(legacyPath);
+    config.id = config.id || selectedCharacterId;
+    return config;
+  } catch (err) {
+    if (legacyPath !== "/assets/characters/BaseCharacter.json") {
+      console.warn(`[Character] Failed to load '${legacyPath}', falling back to '/assets/characters/BaseCharacter.json'.`);
+      selectedCharacterId = "base";
+      const config = await fetchJSON("/assets/characters/BaseCharacter.json");
+      config.id = config.id || selectedCharacterId;
+      return config;
+    }
+    throw err;
+  }
 }
 
 async function loadMapConfigFromId() {
@@ -125,8 +186,9 @@ async function main() {
   try {
     Renderer.setLoadProgress(5, "Fetching configs…");
 
-    charConfig = await fetchJSON("/assets/characters/BaseCharacter.json");
+    charConfig = await loadCharacterConfigFromId();
     mapConfig = await loadMapConfigFromId();
+    console.log(`[Character] Using character id: ${charConfig.id}`);
     console.log(`[Map] Using map id: ${mapConfig.id}`);
 
     // Apply JSON-driven speeds to Renderer constants

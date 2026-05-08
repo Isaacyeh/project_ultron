@@ -370,8 +370,8 @@ export const Renderer = (() => {
     );
     camera.lowerRadiusLimit  = tp.lowerRadiusLimit ?? 2;
     camera.upperRadiusLimit  = tp.upperRadiusLimit ?? 20;
-    camera.lowerBetaLimit    = 0.05;
-    camera.upperBetaLimit    = Math.PI / 2.1;
+    camera.lowerBetaLimit    = 0;
+    camera.upperBetaLimit    = Math.PI;
     camera.useBouncingBehavior     = false;
     camera.useAutoRotationBehavior = false;
 
