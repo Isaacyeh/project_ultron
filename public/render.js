@@ -7,7 +7,13 @@
 
 "use strict";
 
-import { GRAVITY_Y, TERMINAL_VELOCITY } from "./variables.js";
+import {
+  CAMERA_FIRST_PERSON_RADIUS,
+  CAMERA_THIRD_PERSON_MAX_RADIUS,
+  CAMERA_THIRD_PERSON_MIN_RADIUS,
+  GRAVITY_Y,
+  TERMINAL_VELOCITY
+} from "./variables.js";
 
 export const Renderer = (() => {
 
@@ -374,8 +380,8 @@ export const Renderer = (() => {
       BABYLON.Vector3.Zero(),
       scene
     );
-    camera.lowerRadiusLimit  = tp.lowerRadiusLimit ?? 2;
-    camera.upperRadiusLimit  = tp.upperRadiusLimit ?? 20;
+    camera.lowerRadiusLimit  = CAMERA_FIRST_PERSON_RADIUS;
+    camera.upperRadiusLimit  = CAMERA_THIRD_PERSON_MAX_RADIUS;
     camera.lowerBetaLimit    = 0;
     camera.upperBetaLimit    = Math.PI;
     camera.useBouncingBehavior     = false;
@@ -626,7 +632,7 @@ export const Renderer = (() => {
           const idleAnimName = charConfig.animations?.idle ?? "Idle";
           playAnim(animGroups, idleAnimName, true);
 
-          const nameTag = makeNameTag("P_" + id.slice(0, 6), root);
+          const nameTag = makeNameTag("P_" + id.slice(0, 6), root, collision.height);
           const skinnedMesh = (meshes || []).find(m => m.skeleton) || null;
           remotePlayers[id] = {
             root,
@@ -648,12 +654,13 @@ export const Renderer = (() => {
   }
 
   // ── Floating name tag ─────────────────────────────────────────────────────
-  function makeNameTag(label, parentMesh) {
+  function makeNameTag(label, parentMesh, playerHeight = DEFAULT_CHARACTER_COLLISION.height) {
+    const tagHeight = Math.max(2.0, Number(playerHeight) + 0.35);
     const plane = BABYLON.MeshBuilder.CreatePlane(
       "tag_" + label, { width: 2.2, height: 0.55 }, scene
     );
     plane.parent       = parentMesh;
-    plane.position     = new BABYLON.Vector3(0, 2.6, 0);
+    plane.position     = new BABYLON.Vector3(0, tagHeight, 0);
     plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
     plane.isPickable   = false;
 
@@ -669,6 +676,17 @@ export const Renderer = (() => {
     plane.material      = mat;
 
     return plane;
+  }
+
+  function updateNameTagPosition(nameTag, collision) {
+    if (!nameTag) return;
+
+    const playerHeight = Number(collision?.height);
+    const tagHeight = Number.isFinite(playerHeight) && playerHeight > 0
+      ? Math.max(2.0, playerHeight + 0.35)
+      : 2.6;
+
+    nameTag.position.y = tagHeight;
   }
 
   // ── Remove remote player ──────────────────────────────────────────────────
@@ -697,6 +715,7 @@ export const Renderer = (() => {
 
     if (collision) {
       rp.collision = sanitizeCollision(collision);
+      updateNameTagPosition(rp.nameTag, rp.collision);
     }
 
     const nextPosition = BABYLON.Vector3.Lerp(
@@ -876,7 +895,12 @@ export const Renderer = (() => {
     if (!localPlayer) return;
     const heightOffset = localPlayer.config.camera?.thirdPerson?.heightOffset ?? 2;
     const target = localPlayer.root.position.add(new BABYLON.Vector3(0, heightOffset, 0));
-    camera.target = BABYLON.Vector3.Lerp(camera.target, target, 0.14);
+    camera.target.copyFrom(target);
+
+    const isFirstPerson = camera.radius < CAMERA_THIRD_PERSON_MIN_RADIUS;
+    if (localPlayer.visualRoot) {
+      localPlayer.visualRoot.setEnabled(!isFirstPerson);
+    }
   }
 
   // ── Render loop ───────────────────────────────────────────────────────────

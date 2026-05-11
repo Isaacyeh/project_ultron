@@ -7,6 +7,7 @@
 "use strict";
 
 import { Renderer } from "./render.js";
+import { CAMERA_FIRST_PERSON_RADIUS, CAMERA_THIRD_PERSON_MAX_RADIUS } from "./variables.js";
 
 // ── Configs (loaded from JSON) ─────────────────────────────────────────────
 let charConfig = null;
@@ -534,9 +535,8 @@ function setupInput() {
   // Scroll wheel zoom
   canvas.addEventListener("wheel", (e) => {
     const cam = Renderer.getCamera();
-    const tp  = charConfig?.camera?.thirdPerson;
-    const min = tp?.lowerRadiusLimit ?? 2;
-    const max = tp?.upperRadiusLimit ?? 20;
+    const min = CAMERA_FIRST_PERSON_RADIUS;
+    const max = CAMERA_THIRD_PERSON_MAX_RADIUS;
     cam.radius = Math.max(min, Math.min(max, cam.radius + e.deltaY * 0.02));
     e.preventDefault();
   }, { passive: false });

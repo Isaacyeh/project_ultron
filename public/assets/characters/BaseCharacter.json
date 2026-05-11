@@ -41,9 +41,7 @@
   "camera": {
     "thirdPerson": {
       "radius":        8,
-      "heightOffset":  3,
-      "lowerRadiusLimit": 2,
-      "upperRadiusLimit": 20
+      "heightOffset":  3
     }
   }
 }
