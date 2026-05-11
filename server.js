@@ -118,6 +118,7 @@ function createPlayer(id) {
     position: { ...SPAWN },
     rotation: 0,       // Y-axis rotation in radians
     animation: "Idle",
+    swordEquipped: false,
     health: 100,
     name: `Player_${id.slice(0, 4)}`,
     correctionVersion: 0
@@ -152,6 +153,9 @@ io.on("connection", (socket) => {
     p.position.z = typeof data.position?.z === "number" ? data.position.z : p.position.z;
     p.rotation   = typeof data.rotation   === "number" ? data.rotation   : p.rotation;
     p.animation  = typeof data.animation  === "string" ? data.animation  : p.animation;
+    if (typeof data.swordEquipped === "boolean") {
+      p.swordEquipped = data.swordEquipped;
+    }
     attachCollision(p, data.collision);
 
     resolvePlayerSeparation(players);
@@ -162,6 +166,7 @@ io.on("connection", (socket) => {
       position: p.position,
       rotation: p.rotation,
       animation: p.animation,
+      swordEquipped: p.swordEquipped,
       collision: p.collision,
       correctionVersion: p.correctionVersion ?? 0
     });

@@ -35,6 +35,7 @@ let lastSend     = 0;
 // ── Sword state ────────────────────────────────────────────────────────────
 let swordEquipped = false;
 let isAttacking = false;
+let currentAttackAnim = null;
 let attackCooldown = 0;
 const ATTACK_COOLDOWN = 0.6; // seconds between attacks
 
@@ -240,6 +241,7 @@ function connectSocket() {
     socket.on("init", async ({ self, players }) => {
       for (const p of players) {
         await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
+        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision);
       }
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
       resolve();
@@ -248,6 +250,7 @@ function connectSocket() {
     socket.on("playerJoined", async (p) => {
       addSystemMsg(`${p.name} joined.`);
       await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
+      Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision);
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
     });
 
@@ -257,12 +260,12 @@ function connectSocket() {
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
     });
 
-    socket.on("playerUpdated", ({ id, position, rotation, animation, collision, correctionVersion }) => {
+    socket.on("playerUpdated", ({ id, position, rotation, animation, swordEquipped, collision, correctionVersion }) => {
       if (id === selfId) {
         Renderer.setLocalPlayerState(position, rotation, collision, correctionVersion);
         return;
       }
-      Renderer.updateRemotePlayer(id, position, rotation, animation, collision);
+      Renderer.updateRemotePlayer(id, position, rotation, animation, swordEquipped, collision);
     });
 
     socket.on("worldState", ({ players }) => {
@@ -271,7 +274,7 @@ function connectSocket() {
           Renderer.setLocalPlayerState(p.position, p.rotation, p.collision, p.correctionVersion);
           return;
         }
-        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.collision);
+        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision);
       });
     });
 
@@ -305,9 +308,12 @@ function onFrame(dt) {
 
   // Check if attack animation has finished
   if (isAttacking && player.animGroups) {
-    const punchAnim = player.animGroups.find(ag => ag.name === "Punch");
-    if (punchAnim && !punchAnim.isPlaying) {
+    const attackAnim = currentAttackAnim
+      ? player.animGroups.find(ag => ag.name === currentAttackAnim)
+      : null;
+    if (!attackAnim || !attackAnim.isPlaying) {
       isAttacking = false;
+      currentAttackAnim = null;
     }
   }
 
@@ -387,6 +393,7 @@ function onFrame(dt) {
       },
       rotation:  player.root.rotation.y,
       animation: animName,
+      swordEquipped,
       collision: player.collision
     });
   }
@@ -412,6 +419,20 @@ function setupInput() {
           Renderer.equipSword(player);
         } else {
           Renderer.unequipSword(player);
+        }
+
+        if (socket) {
+          socket.emit("playerUpdate", {
+            position: {
+              x: player.root.position.x,
+              y: player.root.position.y,
+              z: player.root.position.z
+            },
+            rotation: player.root.rotation.y,
+            animation: player.currentAnim,
+            swordEquipped,
+            collision: player.collision
+          });
         }
       }
       e.preventDefault();
@@ -458,10 +479,30 @@ function setupInput() {
           const fallback = player.animGroups && player.animGroups.some(ag => ag.name === "Punch");
           if (hasSwordSlash) {
             Renderer.playAnim(player.animGroups, preferred, false);
+            player.currentAnim = preferred;
+            currentAttackAnim = preferred;
           } else if (fallback) {
             Renderer.playAnim(player.animGroups, "Punch", false);
+            player.currentAnim = "Punch";
+            currentAttackAnim = "Punch";
           } else {
             // As a last resort, stop updating animations briefly
+            isAttacking = false;
+            currentAttackAnim = null;
+          }
+
+          if (socket) {
+            socket.emit("playerUpdate", {
+              position: {
+                x: player.root.position.x,
+                y: player.root.position.y,
+                z: player.root.position.z
+              },
+              rotation: player.root.rotation.y,
+              animation: player.currentAnim,
+              swordEquipped,
+              collision: player.collision
+            });
           }
         }
       }

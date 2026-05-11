@@ -31,6 +31,12 @@ export const Renderer = (() => {
     });
   }
 
+  function shouldLoopAnimation(name) {
+    if (!name) return true;
+    if (name === "Punch") return false;
+    return !/(slash|attack)/i.test(name);
+  }
+
   // ── Sword loading and positioning ──────────────────────────────────────
   function loadSwordModel(player) {
     return new Promise(async (resolve, reject) => {
@@ -587,7 +593,7 @@ export const Renderer = (() => {
     return new Promise((resolve) => {
       BABYLON.SceneLoader.ImportMesh(
         "", "/assets/", charConfig.file, scene,
-        function (meshes, _ps, _sk, animGroups) {
+        function (meshes, _ps, skeletons, animGroups) {
           if (!meshes || meshes.length === 0) return resolve(null);
 
           // Create a parent transform node for cleaner rotation control
@@ -621,7 +627,20 @@ export const Renderer = (() => {
           playAnim(animGroups, idleAnimName, true);
 
           const nameTag = makeNameTag("P_" + id.slice(0, 6), root);
-          remotePlayers[id] = { root, visualRoot, collider, animGroups, nameTag, currentAnim: idleAnimName, collision };
+          const skinnedMesh = (meshes || []).find(m => m.skeleton) || null;
+          remotePlayers[id] = {
+            root,
+            visualRoot,
+            collider,
+            animGroups,
+            nameTag,
+            currentAnim: idleAnimName,
+            collision,
+            skeletons: skeletons || null,
+            skinnedMesh,
+            swordEquipped: false,
+            sword: null
+          };
           resolve(remotePlayers[id]);
         }
       );
@@ -663,9 +682,18 @@ export const Renderer = (() => {
   }
 
   // ── Update remote player ──────────────────────────────────────────────────
-  function updateRemotePlayer(id, position, rotation, animName, collision) {
+  function updateRemotePlayer(id, position, rotation, animName, swordEquipped, collision) {
     const rp = remotePlayers[id];
     if (!rp) return;
+
+    if (typeof swordEquipped === "boolean" && swordEquipped !== rp.swordEquipped) {
+      rp.swordEquipped = swordEquipped;
+      if (rp.swordEquipped) {
+        equipSword(rp);
+      } else {
+        unequipSword(rp);
+      }
+    }
 
     if (collision) {
       rp.collision = sanitizeCollision(collision);
@@ -691,7 +719,7 @@ export const Renderer = (() => {
 
     if (animName && animName !== rp.currentAnim) {
       rp.currentAnim = animName;
-      playAnim(rp.animGroups, animName, true);
+      playAnim(rp.animGroups, animName, shouldLoopAnimation(animName));
     }
   }
 
