@@ -11,6 +11,7 @@ import {
   CAMERA_FIRST_PERSON_RADIUS,
   CAMERA_THIRD_PERSON_MAX_RADIUS,
   CAMERA_THIRD_PERSON_MIN_RADIUS,
+  CAMERA_FOLLOW_SMOOTHING,
   GRAVITY_Y,
   TERMINAL_VELOCITY
 } from "./variables.js";
@@ -919,8 +920,12 @@ export const Renderer = (() => {
   function updateCameraTarget() {
     if (!localPlayer) return;
     const heightOffset = localPlayer.config.camera?.thirdPerson?.heightOffset ?? 2;
-    const target = localPlayer.root.position.add(new BABYLON.Vector3(0, heightOffset, 0));
-    camera.target.copyFrom(target);
+    const desiredTarget = localPlayer.root.position.add(new BABYLON.Vector3(0, heightOffset, 0));
+    
+    // Smoothly interpolate the camera target to reduce collision vibrations
+    camera.target.x += (desiredTarget.x - camera.target.x) * CAMERA_FOLLOW_SMOOTHING;
+    camera.target.y += (desiredTarget.y - camera.target.y) * CAMERA_FOLLOW_SMOOTHING;
+    camera.target.z += (desiredTarget.z - camera.target.z) * CAMERA_FOLLOW_SMOOTHING;
 
     const isFirstPerson = camera.radius < CAMERA_THIRD_PERSON_MIN_RADIUS;
     if (localPlayer.visualRoot) {
