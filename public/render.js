@@ -827,7 +827,9 @@ export const Renderer = (() => {
     const horizontalPerStep = delta.scale(1 / physicsSteps);
 
     const maxStep = 0.08;
-    const groundedEps = 1e-3;
+    // Tolerance for detecting ground contact — raised slightly to avoid
+    // tiny oscillations when gravity is high or floating-point error occurs.
+    const groundedEps = 0.02;
     const gravityY = scene?.gravity?.y ?? GRAVITY_Y;
 
     let supported = localPlayer._grounded === true;
@@ -851,7 +853,23 @@ export const Renderer = (() => {
         }
 
         // In air, keep horizontal collision response from injecting extra vertical speed.
-        if (!supported) {
+        // On slopes, preserve upward ground-following movement, but snap back
+        // tiny downward corrections so the collider does not chatter on the incline.
+        const yAfterHorizontal = collider.position.y;
+
+        // Make slope tolerance scale with horizontal movement so faster
+        // movement (sprinting) allows slightly larger micro-step corrections
+        // without producing visible jitter. Clamp the added tolerance so
+        // we don't swallow meaningful collisions.
+        // For sprinting, allow larger micro-step tolerance to avoid jitter.
+        // Increase multiplier and clamp so faster movement tolerates more.
+        const slopeTolerance = groundedEps + Math.max(0, Math.min(horizontalDistance * 0.6, 0.3));
+
+        const smallDownwardCorrection =
+          yAfterHorizontal < yBeforeHorizontal &&
+          (yBeforeHorizontal - yAfterHorizontal) < slopeTolerance;
+
+        if (!supported || smallDownwardCorrection) {
           collider.position.y = yBeforeHorizontal;
         }
       }
@@ -872,9 +890,16 @@ export const Renderer = (() => {
         const verticalMoved = yAfterVertical - yBeforeVertical;
         const groundedNow = verticalStep < 0 && verticalMoved > verticalStep + groundedEps;
 
-        // Landing: reset accumulated fall acceleration immediately.
+        // Landing: reset accumulated fall acceleration immediately and
+        // snap the collider to the pre-vertical position to avoid tiny
+        // penetrations that can cause visual vibration.
         if (groundedNow) {
           localPlayer._velY = 0;
+          try {
+            collider.position.y = yBeforeVertical;
+          } catch (e) {
+            // If anything goes wrong with snapping, ignore and continue.
+          }
         }
 
         supported = groundedNow;
