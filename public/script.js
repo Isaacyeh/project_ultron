@@ -242,7 +242,7 @@ function connectSocket() {
     socket.on("init", async ({ self, players }) => {
       for (const p of players) {
         await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
-        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision);
+        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision, p.jumpPhase);
       }
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
       resolve();
@@ -251,7 +251,7 @@ function connectSocket() {
     socket.on("playerJoined", async (p) => {
       addSystemMsg(`${p.name} joined.`);
       await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
-      Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision);
+      Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision, p.jumpPhase);
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
     });
 
@@ -261,12 +261,13 @@ function connectSocket() {
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
     });
 
-    socket.on("playerUpdated", ({ id, position, rotation, animation, swordEquipped, collision, correctionVersion }) => {
+    socket.on("playerUpdated", (payload) => {
+      const { id, position, rotation, animation, swordEquipped, collision, correctionVersion, jumpPhase } = payload;
       if (id === selfId) {
         Renderer.setLocalPlayerState(position, rotation, collision, correctionVersion);
         return;
       }
-      Renderer.updateRemotePlayer(id, position, rotation, animation, swordEquipped, collision);
+      Renderer.updateRemotePlayer(id, position, rotation, animation, swordEquipped, collision, jumpPhase);
     });
 
     socket.on("worldState", ({ players }) => {
@@ -275,7 +276,7 @@ function connectSocket() {
           Renderer.setLocalPlayerState(p.position, p.rotation, p.collision, p.correctionVersion);
           return;
         }
-        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision);
+        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision, p.jumpPhase);
       });
     });
 
@@ -394,6 +395,7 @@ function onFrame(dt) {
       },
       rotation:  player.root.rotation.y,
       animation: animName,
+      jumpPhase: player.jumpState?.phase ?? null,
       swordEquipped,
       collision: player.collision
     });
@@ -403,6 +405,10 @@ function onFrame(dt) {
 // ── Input setup ────────────────────────────────────────────────────────────
 function setupInput() {
   const canvas = Renderer.getEngine().getRenderingCanvas();
+
+  function isJumpKey(e) {
+    return e.code === "Space" || e.code === "Spacebar" || e.key === " " || e.key === "Spacebar";
+  }
 
   document.addEventListener("keydown", (e) => {
     // Escape exits pointer lock
@@ -441,6 +447,28 @@ function setupInput() {
     }
 
     if (chatFocused) return;
+    if (isJumpKey(e)) {
+      const started = Renderer.requestJump();
+      if (started) {
+        const player = Renderer.getPlayer();
+        if (player && socket) {
+          socket.emit("playerUpdate", {
+            position: {
+              x: player.root.position.x,
+              y: player.root.position.y,
+              z: player.root.position.z
+            },
+            rotation: player.root.rotation.y,
+            animation: player.currentAnim,
+            jumpPhase: player.jumpState?.phase ?? null,
+            swordEquipped,
+            collision: player.collision
+          });
+        }
+      }
+      e.preventDefault();
+      return;
+    }
     if (keys.hasOwnProperty(e.key)) { keys[e.key] = true; e.preventDefault(); }
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
       keys[e.code] = true;
@@ -501,6 +529,7 @@ function setupInput() {
               },
               rotation: player.root.rotation.y,
               animation: player.currentAnim,
+              jumpPhase: player.jumpState?.phase ?? null,
               swordEquipped,
               collision: player.collision
             });

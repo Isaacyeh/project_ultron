@@ -1,6 +1,7 @@
 // Gravity variables
 export const GRAVITY_Y = -50;
 export const TERMINAL_VELOCITY = -50;
+export const JUMP_HEIGHT = 5;
 
 // Camera Variables
 export const CAMERA_FIRST_PERSON_RADIUS = 0.2;

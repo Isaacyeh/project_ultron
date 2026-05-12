@@ -13,7 +13,8 @@ import {
   CAMERA_THIRD_PERSON_MIN_RADIUS,
   CAMERA_FOLLOW_SMOOTHING,
   GRAVITY_Y,
-  TERMINAL_VELOCITY
+  TERMINAL_VELOCITY,
+  JUMP_HEIGHT
 } from "./variables.js";
 
 export const Renderer = (() => {
@@ -26,21 +27,52 @@ export const Renderer = (() => {
 
   // ── Animation helpers ─────────────────────────────────────────────────────
   function playAnim(animGroups, name, loop = true) {
-    if (!animGroups || !animGroups.length) return;
+    playAnimRange(animGroups, name, { loop });
+  }
+
+  function playAnimRange(animGroups, name, options = {}) {
+    if (!animGroups || !animGroups.length) return false;
+
+    const loop = options.loop ?? true;
+    const startRatio = Math.max(0, Math.min(1, options.startRatio ?? 0));
+    const endRatio = Math.max(startRatio, Math.min(1, options.endRatio ?? 1));
+    const speedRatio = options.speedRatio ?? 1.0;
+    let played = false;
+
     animGroups.forEach(ag => {
       if (ag.name === name) {
-        ag.start(loop, 1.0, ag.from, ag.to, false);
+        const from = Number.isFinite(ag.from) ? ag.from : 0;
+        const to = Number.isFinite(ag.to) ? ag.to : from;
+        const range = to - from;
+        const startFrame = from + range * startRatio;
+        const endFrame = from + range * endRatio;
+
+        ag.start(loop, speedRatio, startFrame, endFrame, false);
         ag.setWeightForAllAnimatables(1);
+        played = true;
       } else {
         ag.setWeightForAllAnimatables(0);
         ag.stop();
       }
     });
+
+    return played;
+  }
+
+  function playJumpPhase(animGroups, jumpAnimName, phase) {
+    const segments = {
+      windup: { startRatio: 0.0, endRatio: 0.28, loop: false },
+      launch: { startRatio: 0.28, endRatio: 0.78, loop: true },
+      recover: { startRatio: 0.78, endRatio: 1.0, loop: false }
+    };
+
+    const segment = segments[phase] || segments.launch;
+    return playAnimRange(animGroups, jumpAnimName, segment);
   }
 
   function shouldLoopAnimation(name) {
     if (!name) return true;
-    if (name === "Punch") return false;
+    if (name === "Punch" || name === "Jump") return false;
     return !/(slash|attack)/i.test(name);
   }
 
@@ -568,9 +600,11 @@ export const Renderer = (() => {
             collision,
             lastAppliedCorrectionVersion: 0,
             currentAnim: idleAnimName,
+            jumpState: null,
             // vertical velocity in world units/second (positive = up)
             _velY: 0,
-            _grounded: true
+            _grounded: true,
+            _lastGroundedAt: typeof performance !== "undefined" ? performance.now() : 0
           };
           // Store skeletons/skinned mesh for later attachment
           localPlayer.skeletons = skeletons || null;
@@ -642,6 +676,7 @@ export const Renderer = (() => {
             animGroups,
             nameTag,
             currentAnim: idleAnimName,
+            currentJumpPhase: null,
             collision,
             skeletons: skeletons || null,
             skinnedMesh,
@@ -701,7 +736,7 @@ export const Renderer = (() => {
   }
 
   // ── Update remote player ──────────────────────────────────────────────────
-  function updateRemotePlayer(id, position, rotation, animName, swordEquipped, collision) {
+  function updateRemotePlayer(id, position, rotation, animName, swordEquipped, collision, jumpPhase) {
     const rp = remotePlayers[id];
     if (!rp) return;
 
@@ -737,10 +772,51 @@ export const Renderer = (() => {
     while (diff < -Math.PI) diff += Math.PI * 2;
     rp.root.rotation.y += diff * 0.15;
 
+    const jumpAnimName = rp.config?.animations?.jump ?? "Jump";
+    if (animName === jumpAnimName) {
+      const nextJumpPhase = jumpPhase || "launch";
+      if (rp.currentAnim !== animName || rp.currentJumpPhase !== nextJumpPhase) {
+        rp.currentAnim = animName;
+        rp.currentJumpPhase = nextJumpPhase;
+        playJumpPhase(rp.animGroups, jumpAnimName, nextJumpPhase);
+      }
+      return;
+    }
+
     if (animName && animName !== rp.currentAnim) {
       rp.currentAnim = animName;
+      rp.currentJumpPhase = null;
       playAnim(rp.animGroups, animName, shouldLoopAnimation(animName));
     }
+  }
+
+  function requestJump() {
+    if (!localPlayer || localPlayer.jumpState) return false;
+
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const groundedRecently =
+      localPlayer._grounded === true ||
+      (typeof localPlayer._lastGroundedAt === "number" && (now - localPlayer._lastGroundedAt) <= 120);
+    if (!groundedRecently) return false;
+
+    const jumpAnimName = localPlayer.config.animations?.jump ?? "Jump";
+    const gravityMagnitude = Math.max(0.001, Math.abs(scene?.gravity?.y ?? GRAVITY_Y));
+    const defaultLaunchVelocity = Math.sqrt(2 * gravityMagnitude * JUMP_HEIGHT);
+    localPlayer.jumpState = {
+      phase: "windup",
+      timer: 0,
+      jumpAnimName,
+      windupDuration: localPlayer.config.movement?.jumpWindup ?? 0.12,
+      launchVelocity: localPlayer.config.movement?.jumpVelocity ?? defaultLaunchVelocity,
+      recoverDuration: localPlayer.config.movement?.jumpRecover ?? 0.18,
+      animatedPhase: null,
+      landed: false
+    };
+    localPlayer._grounded = true;
+    localPlayer._velY = 0;
+    playJumpPhase(localPlayer.animGroups, jumpAnimName, "windup");
+    localPlayer.currentAnim = jumpAnimName;
+    return true;
   }
 
   function setLocalPlayerState(position, rotation, collision, correctionVersion) {
@@ -799,6 +875,25 @@ export const Renderer = (() => {
   function updateLocalAnimation(isMoving, isRunning) {
     if (!localPlayer) return null;
     const anims = localPlayer.config.animations ?? {};
+
+    if (localPlayer.jumpState) {
+      const jumpState = localPlayer.jumpState;
+      const jumpAnimName = jumpState.jumpAnimName ?? (anims.jump ?? "Jump");
+
+      if (jumpState.animatedPhase !== jumpState.phase) {
+        playJumpPhase(localPlayer.animGroups, jumpAnimName, jumpState.phase);
+        jumpState.animatedPhase = jumpState.phase;
+      }
+
+      if (jumpState.phase === "recover" && jumpState.timer >= jumpState.recoverDuration && localPlayer._grounded) {
+        localPlayer.jumpState = null;
+        return updateLocalAnimation(isMoving, isRunning);
+      }
+
+      localPlayer.currentAnim = jumpAnimName;
+      return jumpAnimName;
+    }
+
     const targetAnim = isMoving
       ? (isRunning ? (anims.run ?? "Run") : (anims.walk ?? "Walk"))
       : (anims.idle ?? "Idle");
@@ -832,6 +927,19 @@ export const Renderer = (() => {
     // tiny oscillations when gravity is high or floating-point error occurs.
     const groundedEps = 0.02;
     const gravityY = scene?.gravity?.y ?? GRAVITY_Y;
+
+    const jumpState = localPlayer.jumpState;
+    if (jumpState) {
+      jumpState.timer += safeDt;
+
+      if (jumpState.phase === "windup" && jumpState.timer >= jumpState.windupDuration) {
+        jumpState.phase = "launch";
+        jumpState.timer = 0;
+        jumpState.animatedPhase = null;
+        localPlayer._velY = jumpState.launchVelocity;
+        localPlayer._grounded = false;
+      }
+    }
 
     let supported = localPlayer._grounded === true;
 
@@ -901,12 +1009,26 @@ export const Renderer = (() => {
           } catch (e) {
             // If anything goes wrong with snapping, ignore and continue.
           }
+
+          if (jumpState && jumpState.phase === "launch") {
+            jumpState.phase = "recover";
+            jumpState.timer = 0;
+            jumpState.animatedPhase = null;
+            jumpState.landed = true;
+          }
         }
 
         supported = groundedNow;
       }
 
       localPlayer._grounded = supported;
+      if (supported) {
+        localPlayer._lastGroundedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+      }
+
+      if (jumpState && jumpState.phase === "recover" && localPlayer._grounded && jumpState.timer >= jumpState.recoverDuration) {
+        localPlayer.jumpState = null;
+      }
     }
 
     // Sync visible root to collider position
@@ -961,9 +1083,11 @@ export const Renderer = (() => {
     setLoadProgress,
     hideLoadingScreen,
     playAnim,
+    playJumpPhase,
     equipSword,
     unequipSword,
     updateSwordPosition,
+    requestJump,
 
     getScene:   () => scene,
     getCamera:  () => camera,
