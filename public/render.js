@@ -7,7 +7,15 @@
 
 "use strict";
 
-import { GRAVITY_Y, TERMINAL_VELOCITY } from "./variables.js";
+import {
+  CAMERA_FIRST_PERSON_RADIUS,
+  CAMERA_THIRD_PERSON_MAX_RADIUS,
+  CAMERA_THIRD_PERSON_MIN_RADIUS,
+  CAMERA_FOLLOW_SMOOTHING,
+  GRAVITY_Y,
+  TERMINAL_VELOCITY,
+  JUMP_HEIGHT
+} from "./variables.js";
 
 export const Renderer = (() => {
 
@@ -15,19 +23,196 @@ export const Renderer = (() => {
   let engine, scene, camera, shadowGenerator;
   let localPlayer = null;       // { root, collider, animGroups, config, currentAnim }
   const remotePlayers = {};     // id → { root, animGroups, nameTag, currentAnim }
+  const DEFAULT_CHARACTER_COLLISION = { radius: 0.4, height: 1.8 };
 
   // ── Animation helpers ─────────────────────────────────────────────────────
   function playAnim(animGroups, name, loop = true) {
-    if (!animGroups || !animGroups.length) return;
+    playAnimRange(animGroups, name, { loop });
+  }
+
+  function playAnimRange(animGroups, name, options = {}) {
+    if (!animGroups || !animGroups.length) return false;
+
+    const loop = options.loop ?? true;
+    const startRatio = Math.max(0, Math.min(1, options.startRatio ?? 0));
+    const endRatio = Math.max(startRatio, Math.min(1, options.endRatio ?? 1));
+    const speedRatio = options.speedRatio ?? 1.0;
+    let played = false;
+
     animGroups.forEach(ag => {
       if (ag.name === name) {
-        ag.start(loop, 1.0, ag.from, ag.to, false);
+        const from = Number.isFinite(ag.from) ? ag.from : 0;
+        const to = Number.isFinite(ag.to) ? ag.to : from;
+        const range = to - from;
+        const startFrame = from + range * startRatio;
+        const endFrame = from + range * endRatio;
+
+        ag.start(loop, speedRatio, startFrame, endFrame, false);
         ag.setWeightForAllAnimatables(1);
+        played = true;
       } else {
         ag.setWeightForAllAnimatables(0);
         ag.stop();
       }
     });
+
+    return played;
+  }
+
+  function playJumpPhase(animGroups, jumpAnimName, phase) {
+    const segments = {
+      windup: { startRatio: 0.0, endRatio: 0.28, loop: false },
+      launch: { startRatio: 0.28, endRatio: 0.78, loop: true },
+      recover: { startRatio: 0.78, endRatio: 1.0, loop: false }
+    };
+
+    const segment = segments[phase] || segments.launch;
+    return playAnimRange(animGroups, jumpAnimName, segment);
+  }
+
+  function shouldLoopAnimation(name) {
+    if (!name) return true;
+    if (name === "Punch" || name === "Jump") return false;
+    return !/(slash|attack)/i.test(name);
+  }
+
+  // ── Sword loading and positioning ──────────────────────────────────────
+  function loadSwordModel(player) {
+    return new Promise(async (resolve, reject) => {
+      if (player.sword) {
+        return resolve(player.sword);
+      }
+
+      // Try to load optional JSON config for the sword (orientation, offsets, bone name)
+      let cfg = {
+        file: "weapons/Katana Sword.glb",
+        attachBone: "RightHand",
+        hiltOffset: { x: 0.35, y: 1.5, z: 0.2 },
+        hiltRotation: { x: 0.15, y: 0, z: 0 }
+      };
+
+      try {
+        const r = await fetch("/assets/weapons/Katana Sword.json");
+        if (r.ok) {
+          const userCfg = await r.json();
+          cfg = Object.assign(cfg, userCfg);
+        }
+      } catch (e) {
+        // Ignore missing config — use defaults above
+      }
+
+      BABYLON.SceneLoader.ImportMesh(
+        "",
+        "/assets/",
+        cfg.file,
+        scene,
+        function (meshes, _ps, _sk, _ag) {
+          if (!meshes || meshes.length === 0) {
+            return reject(new Error("Failed to load sword model"));
+          }
+
+          // Create a parent transform for the sword meshes
+          const swordRoot = new BABYLON.TransformNode("swordRoot", scene);
+          // Apply scale from config (default 1)
+          const s = typeof cfg.scale === 'number' ? cfg.scale : 1.0;
+          swordRoot.scaling = new BABYLON.Vector3(s, s, s);
+
+          // Parent all sword meshes to the root
+          meshes.forEach(mesh => {
+            mesh.parent = swordRoot;
+            if (mesh.getTotalVertices && mesh.getTotalVertices() > 0) {
+              try { shadowGenerator.addShadowCaster(mesh, true); } catch (_) {}
+              mesh.receiveShadows = true;
+            }
+          });
+
+          // Create a pivot mesh that will be attached to the bone if possible
+          const pivot = new BABYLON.Mesh("swordPivot", scene);
+          pivot.isVisible = false;
+
+          // Default: parent pivot to visualRoot (local space)
+          pivot.parent = player.visualRoot;
+
+          // If we have a skinned mesh and a bone name, attach pivot to that bone
+          if (player.skinnedMesh && player.skinnedMesh.skeleton && cfg.attachBone) {
+            const bone = player.skinnedMesh.skeleton.bones.find(b => b.name === cfg.attachBone);
+            if (bone) {
+              try {
+                pivot.attachToBone(bone, player.skinnedMesh);
+                // When attached to bone, keep swordRoot parented to pivot so it follows bone
+                swordRoot.parent = pivot;
+                player.sword = { root: swordRoot, meshes: meshes, pivotAttached: true, pivot };
+                // Apply local offsets/rotation
+                swordRoot.position = new BABYLON.Vector3(cfg.hiltOffset.x, cfg.hiltOffset.y, cfg.hiltOffset.z);
+                swordRoot.rotation = new BABYLON.Vector3(cfg.hiltRotation.x, cfg.hiltRotation.y, cfg.hiltRotation.z);
+                return resolve(player.sword);
+              } catch (e) {
+                console.warn("[Sword] Could not attach to bone, falling back to visualRoot", e);
+              }
+            }
+          }
+
+          // Fallback: parent swordRoot to visualRoot and set local transform
+          swordRoot.parent = player.visualRoot;
+          swordRoot.position = new BABYLON.Vector3(cfg.hiltOffset.x, cfg.hiltOffset.y, cfg.hiltOffset.z);
+          swordRoot.rotation = new BABYLON.Vector3(cfg.hiltRotation.x, cfg.hiltRotation.y, cfg.hiltRotation.z);
+
+          player.sword = { root: swordRoot, meshes: meshes, pivotAttached: false };
+          resolve(player.sword);
+        },
+        function (evt) {
+          // Progress — ignored
+        },
+        function (sceneErr, msg, ex) {
+          const detail = (ex && ex.message) ? ex.message : String(msg ?? "unknown error");
+          console.error("[Sword] Load failed:", detail);
+          reject(new Error("Failed to load sword — " + detail));
+        }
+      );
+    });
+  }
+
+  function updateSwordPosition(player) {
+    if (!player.sword || !player.sword.root) return;
+
+    // If sword is attached to a bone pivot we don't need to update world position
+    if (player.sword.pivotAttached) return;
+
+    const swordRoot = player.sword.root;
+
+    // Local offsets (if not attached to bone) — tweak via JSON config
+    const handOffsetLocal = new BABYLON.Vector3(0.35, 1.5, 0.2);
+    swordRoot.position.copyFrom(handOffsetLocal);
+    swordRoot.rotation.x = 0.15;
+    swordRoot.rotation.y = 0;
+    swordRoot.rotation.z = 0;
+  }
+
+  // ── Sword equipment ───────────────────────────────────────────────────────
+  async function equipSword(player) {
+    if (!player) return;
+    try {
+      await loadSwordModel(player);
+      // Position the sword immediately when not attached to bone
+      if (player.sword && !player.sword.pivotAttached) updateSwordPosition(player);
+    } catch (err) {
+      console.error("[Sword] Failed to equip:", err);
+    }
+  }
+
+  function unequipSword(player) {
+    if (!player || !player.sword) return;
+    try {
+      if (player.sword.root) {
+        player.sword.root.dispose();
+      }
+      player.sword.meshes?.forEach(m => {
+        try { m.dispose(); } catch (_) {}
+      });
+      player.sword = null;
+    } catch (err) {
+      console.error("[Sword] Failed to unequip:", err);
+    }
   }
 
   // ── Loading bar ───────────────────────────────────────────────────────────
@@ -43,6 +228,108 @@ export const Renderer = (() => {
     if (!ls) return;
     ls.classList.add("hidden");
     setTimeout(() => { if (ls.parentNode) ls.parentNode.removeChild(ls); }, 700);
+  }
+
+  function sanitizeCollision(collision) {
+    const radius = Number(collision?.radius);
+    const height = Number(collision?.height);
+
+    return {
+      radius: Number.isFinite(radius) && radius > 0 ? radius : DEFAULT_CHARACTER_COLLISION.radius,
+      height: Number.isFinite(height) && height > 0 ? height : DEFAULT_CHARACTER_COLLISION.height
+    };
+  }
+
+  function getRealMeshes(meshes) {
+    return (meshes || []).filter(m => typeof m?.getTotalVertices === "function" ? m.getTotalVertices() > 0 : true);
+  }
+
+  function getHierarchyBounds(meshes) {
+    const realMeshes = getRealMeshes(meshes);
+    if (!realMeshes.length) return null;
+
+    let min = null;
+    let max = null;
+
+    realMeshes.forEach(mesh => {
+      try {
+        mesh.computeWorldMatrix(true);
+      } catch (_) {
+        // Ignore individual mesh failures and continue with the rest.
+      }
+
+      const info = mesh.getBoundingInfo ? mesh.getBoundingInfo() : null;
+      const box = info?.boundingBox;
+      const minimum = box?.minimumWorld;
+      const maximum = box?.maximumWorld;
+
+      if (!minimum || !maximum) return;
+
+      min = min
+        ? BABYLON.Vector3.Minimize(min, minimum)
+        : minimum.clone();
+      max = max
+        ? BABYLON.Vector3.Maximize(max, maximum)
+        : maximum.clone();
+    });
+
+    return min && max ? { min, max } : null;
+  }
+
+  function buildCharacterCollision(meshes, fallbackCollision) {
+    const bounds = getHierarchyBounds(meshes);
+    if (!bounds) return sanitizeCollision(fallbackCollision);
+
+    const width = Math.max(0.1, bounds.max.x - bounds.min.x);
+    const depth = Math.max(0.1, bounds.max.z - bounds.min.z);
+    const height = Math.max(0.1, bounds.max.y - bounds.min.y);
+
+    return sanitizeCollision({
+      radius: Math.max(width, depth) * 0.5,
+      height
+    });
+  }
+
+  function getCharacterVisualOffset(meshes) {
+    const bounds = getHierarchyBounds(meshes);
+    if (!bounds) return BABYLON.Vector3.Zero();
+
+    const centerX = (bounds.min.x + bounds.max.x) * 0.5;
+    const centerZ = (bounds.min.z + bounds.max.z) * 0.5;
+
+    return new BABYLON.Vector3(-centerX, -bounds.min.y, -centerZ);
+  }
+
+  function createCharacterCollider(name, collision) {
+    const shape = sanitizeCollision(collision);
+    const collider = BABYLON.MeshBuilder.CreateBox(
+      name,
+      { width: shape.radius * 2, depth: shape.radius * 2, height: shape.height },
+      scene
+    );
+
+    collider.isVisible = false;
+    collider.isPickable = false;
+    collider.checkCollisions = true;
+    collider.ellipsoid = new BABYLON.Vector3(shape.radius, shape.height / 2, shape.radius);
+    collider.ellipsoidOffset = new BABYLON.Vector3(0, shape.height / 2, 0);
+
+    return collider;
+  }
+
+  function attachCharacterMeshes(meshes, visualRoot, isRemote = false) {
+    getRealMeshes(meshes).forEach(mesh => {
+      mesh.parent = visualRoot;
+      if (mesh.getTotalVertices && mesh.getTotalVertices() > 0) {
+        if (!isRemote) {
+          shadowGenerator.addShadowCaster(mesh, true);
+        }
+        mesh.receiveShadows = true;
+      }
+      if (mesh.material) {
+        mesh.material.backFaceCulling = !isRemote;
+      }
+    });
   }
 
   // ── Engine & Scene ────────────────────────────────────────────────────────
@@ -126,10 +413,10 @@ export const Renderer = (() => {
       BABYLON.Vector3.Zero(),
       scene
     );
-    camera.lowerRadiusLimit  = tp.lowerRadiusLimit ?? 2;
-    camera.upperRadiusLimit  = tp.upperRadiusLimit ?? 20;
-    camera.lowerBetaLimit    = 0.05;
-    camera.upperBetaLimit    = Math.PI / 2.1;
+    camera.lowerRadiusLimit  = CAMERA_FIRST_PERSON_RADIUS;
+    camera.upperRadiusLimit  = CAMERA_THIRD_PERSON_MAX_RADIUS;
+    camera.lowerBetaLimit    = 0;
+    camera.upperBetaLimit    = Math.PI;
     camera.useBouncingBehavior     = false;
     camera.useAutoRotationBehavior = false;
 
@@ -250,7 +537,7 @@ export const Renderer = (() => {
         charConfig.file,
         scene,
         // onSuccess
-        function (meshes, _ps, _sk, animGroups) {
+        function (meshes, _ps, skeletons, animGroups) {
 
           if (!meshes || meshes.length === 0) {
             return reject(new Error("Character GLTF returned no meshes."));
@@ -260,40 +547,31 @@ export const Renderer = (() => {
           const root = new BABYLON.TransformNode("localPlayer", scene);
           const visualRoot = new BABYLON.TransformNode("localPlayerVisual", scene);
           visualRoot.parent = root;
-          visualRoot.rotation.y = charConfig.modelYawOffset ?? 0;
+          // Model assets sometimes export facing the opposite direction; apply
+          // a 180° correction so the visible model faces the same way the
+          // logical player root is oriented and moves.
+          visualRoot.rotation.y = (charConfig.modelYawOffset ?? 0) + Math.PI;
+          const s = charConfig.scale ?? 1;
+          visualRoot.scaling = new BABYLON.Vector3(s, s, s);
+
+          // Parent all loaded meshes to the transform node so model swaps keep
+          // the collision logic and visible model aligned.
+          attachCharacterMeshes(meshes, visualRoot, false);
+
+          // Keep the visible model grounded at the logical player root.
+          visualRoot.position = getCharacterVisualOffset(meshes);
+
           root.position = new BABYLON.Vector3(
             (spawnPos?.x ?? 0) + (charConfig.spawnOffset?.x ?? 0),
             (spawnPos?.y ?? 0) + (charConfig.spawnOffset?.y ?? 0),
             (spawnPos?.z ?? 0) + (charConfig.spawnOffset?.z ?? 0)
           );
 
-          // Parent all loaded meshes to the transform node
-          meshes[0].parent = visualRoot;
-          const s = charConfig.scale ?? 1;
-          meshes[0].scaling = new BABYLON.Vector3(s, s, s);
-
-          // Add to shadow casters
-          meshes.forEach(m => {
-            if (m.getTotalVertices && m.getTotalVertices() > 0) {
-              shadowGenerator.addShadowCaster(m, true);
-              m.receiveShadows = true;
-            }
-          });
+          const collision = buildCharacterCollision(meshes, charConfig.collision);
 
           // Create a hidden collider that participates in scene collisions.
           // The visible GLTF hierarchy stays parented under `root`.
-          const col = charConfig.collision ?? { radius: 0.4, height: 1.8 };
-          const colliderHalfHeight = col.height / 2;
-          const collider = BABYLON.MeshBuilder.CreateBox(
-            "localPlayerCollider",
-            { width: col.radius * 2, depth: col.radius * 2, height: col.height },
-            scene
-          );
-          collider.isVisible = false;
-          collider.isPickable = false;
-          collider.checkCollisions = true;
-          collider.ellipsoid = new BABYLON.Vector3(col.radius, colliderHalfHeight, col.radius);
-          collider.ellipsoidOffset = new BABYLON.Vector3(0, colliderHalfHeight, 0);
+          const collider = createCharacterCollider("localPlayerCollider", collision);
           collider.position = new BABYLON.Vector3(
             root.position.x,
             root.position.y,
@@ -310,16 +588,27 @@ export const Renderer = (() => {
             root.position.add(new BABYLON.Vector3(0, heightOffset, 0))
           );
 
+          // Find skinned mesh (the mesh that contains a skeleton) for bone attachment
+          const skinnedMesh = (meshes || []).find(m => m.skeleton) || null;
+
           localPlayer = {
             root,
+            visualRoot,
             collider,
             animGroups,
             config: charConfig,
+            collision,
+            lastAppliedCorrectionVersion: 0,
             currentAnim: idleAnimName,
+            jumpState: null,
             // vertical velocity in world units/second (positive = up)
             _velY: 0,
-            _grounded: true
+            _grounded: true,
+            _lastGroundedAt: typeof performance !== "undefined" ? performance.now() : 0
           };
+          // Store skeletons/skinned mesh for later attachment
+          localPlayer.skeletons = skeletons || null;
+          localPlayer.skinnedMesh = skinnedMesh;
           setLoadProgress(85, "Character ready.");
           resolve(localPlayer);
         },
@@ -341,39 +630,59 @@ export const Renderer = (() => {
   }
 
   // ── Load remote player ────────────────────────────────────────────────────
-  function addRemotePlayer(id, charConfig, spawnPos) {
+  function addRemotePlayer(id, charConfig, spawnPos, collisionFromServer) {
     return new Promise((resolve) => {
       BABYLON.SceneLoader.ImportMesh(
         "", "/assets/", charConfig.file, scene,
-        function (meshes, _ps, _sk, animGroups) {
+        function (meshes, _ps, skeletons, animGroups) {
           if (!meshes || meshes.length === 0) return resolve(null);
 
           // Create a parent transform node for cleaner rotation control
           const root = new BABYLON.TransformNode("remote_" + id, scene);
           const visualRoot = new BABYLON.TransformNode("remote_" + id + "_visual", scene);
           visualRoot.parent = root;
-          visualRoot.rotation.y = charConfig.modelYawOffset ?? 0;
+          // Apply the same 180° correction for remote visuals so everyone
+          // sees models oriented consistently.
+          visualRoot.rotation.y = (charConfig.modelYawOffset ?? 0) + Math.PI;
+          const s = charConfig.scale ?? 1;
+          visualRoot.scaling = new BABYLON.Vector3(s, s, s);
+
+          attachCharacterMeshes(meshes, visualRoot, true);
+          visualRoot.position = getCharacterVisualOffset(meshes);
+
           root.position = new BABYLON.Vector3(
             spawnPos?.x ?? 0, spawnPos?.y ?? 0, spawnPos?.z ?? 0
           );
 
-          // Parent all loaded meshes to the transform node
-          meshes[0].parent = visualRoot;
-          const s = charConfig.scale ?? 1;
-          meshes[0].scaling = new BABYLON.Vector3(s, s, s);
-
-          meshes.forEach(m => {
-            if (m.getTotalVertices && m.getTotalVertices() > 0) {
-              m.receiveShadows = true;
-            }
-            if (m.material) m.material.backFaceCulling = true;
-          });
+          const collision = sanitizeCollision(
+            collisionFromServer || buildCharacterCollision(meshes, charConfig.collision)
+          );
+          const collider = createCharacterCollider("remote_" + id + "_collider", collision);
+          collider.position = new BABYLON.Vector3(
+            root.position.x,
+            root.position.y,
+            root.position.z
+          );
 
           const idleAnimName = charConfig.animations?.idle ?? "Idle";
           playAnim(animGroups, idleAnimName, true);
 
-          const nameTag = makeNameTag("P_" + id.slice(0, 6), root);
-          remotePlayers[id] = { root, animGroups, nameTag, currentAnim: idleAnimName };
+          const nameTag = makeNameTag("P_" + id.slice(0, 6), root, collision.height);
+          const skinnedMesh = (meshes || []).find(m => m.skeleton) || null;
+          remotePlayers[id] = {
+            root,
+            visualRoot,
+            collider,
+            animGroups,
+            nameTag,
+            currentAnim: idleAnimName,
+            currentJumpPhase: null,
+            collision,
+            skeletons: skeletons || null,
+            skinnedMesh,
+            swordEquipped: false,
+            sword: null
+          };
           resolve(remotePlayers[id]);
         }
       );
@@ -381,12 +690,13 @@ export const Renderer = (() => {
   }
 
   // ── Floating name tag ─────────────────────────────────────────────────────
-  function makeNameTag(label, parentMesh) {
+  function makeNameTag(label, parentMesh, playerHeight = DEFAULT_CHARACTER_COLLISION.height) {
+    const tagHeight = Math.max(2.0, Number(playerHeight) + 0.35);
     const plane = BABYLON.MeshBuilder.CreatePlane(
       "tag_" + label, { width: 2.2, height: 0.55 }, scene
     );
     plane.parent       = parentMesh;
-    plane.position     = new BABYLON.Vector3(0, 2.6, 0);
+    plane.position     = new BABYLON.Vector3(0, tagHeight, 0);
     plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
     plane.isPickable   = false;
 
@@ -404,25 +714,56 @@ export const Renderer = (() => {
     return plane;
   }
 
+  function updateNameTagPosition(nameTag, collision) {
+    if (!nameTag) return;
+
+    const playerHeight = Number(collision?.height);
+    const tagHeight = Number.isFinite(playerHeight) && playerHeight > 0
+      ? Math.max(2.0, playerHeight + 0.35)
+      : 2.6;
+
+    nameTag.position.y = tagHeight;
+  }
+
   // ── Remove remote player ──────────────────────────────────────────────────
   function removeRemotePlayer(id) {
     const rp = remotePlayers[id];
     if (!rp) return;
     try { rp.root.dispose(); }     catch (_) {}
+    try { if (rp.collider) rp.collider.dispose(); } catch (_) {}
     try { if (rp.nameTag) rp.nameTag.dispose(); } catch (_) {}
     delete remotePlayers[id];
   }
 
   // ── Update remote player ──────────────────────────────────────────────────
-  function updateRemotePlayer(id, position, rotation, animName) {
+  function updateRemotePlayer(id, position, rotation, animName, swordEquipped, collision, jumpPhase) {
     const rp = remotePlayers[id];
     if (!rp) return;
 
-    rp.root.position = BABYLON.Vector3.Lerp(
+    if (typeof swordEquipped === "boolean" && swordEquipped !== rp.swordEquipped) {
+      rp.swordEquipped = swordEquipped;
+      if (rp.swordEquipped) {
+        equipSword(rp);
+      } else {
+        unequipSword(rp);
+      }
+    }
+
+    if (collision) {
+      rp.collision = sanitizeCollision(collision);
+      updateNameTagPosition(rp.nameTag, rp.collision);
+    }
+
+    const nextPosition = BABYLON.Vector3.Lerp(
       rp.root.position,
       new BABYLON.Vector3(position.x, position.y, position.z),
       0.2
     );
+    rp.root.position = nextPosition;
+    if (rp.collider) {
+      rp.collider.position.copyFrom(nextPosition);
+      rp.collider.rotation.y = rotation;
+    }
     
     // Smooth rotation towards target rotation
     let diff = rotation - rp.root.rotation.y;
@@ -431,9 +772,102 @@ export const Renderer = (() => {
     while (diff < -Math.PI) diff += Math.PI * 2;
     rp.root.rotation.y += diff * 0.15;
 
+    const jumpAnimName = rp.config?.animations?.jump ?? "Jump";
+    if (animName === jumpAnimName) {
+      const nextJumpPhase = jumpPhase || "launch";
+      if (rp.currentAnim !== animName || rp.currentJumpPhase !== nextJumpPhase) {
+        rp.currentAnim = animName;
+        rp.currentJumpPhase = nextJumpPhase;
+        playJumpPhase(rp.animGroups, jumpAnimName, nextJumpPhase);
+      }
+      return;
+    }
+
     if (animName && animName !== rp.currentAnim) {
       rp.currentAnim = animName;
-      playAnim(rp.animGroups, animName, true);
+      rp.currentJumpPhase = null;
+      playAnim(rp.animGroups, animName, shouldLoopAnimation(animName));
+    }
+  }
+
+  function requestJump() {
+    if (!localPlayer || localPlayer.jumpState) return false;
+
+    const now = typeof performance !== "undefined" ? performance.now() : Date.now();
+    const groundedRecently =
+      localPlayer._grounded === true ||
+      (typeof localPlayer._lastGroundedAt === "number" && (now - localPlayer._lastGroundedAt) <= 120);
+    if (!groundedRecently) return false;
+
+    const jumpAnimName = localPlayer.config.animations?.jump ?? "Jump";
+    const gravityMagnitude = Math.max(0.001, Math.abs(scene?.gravity?.y ?? GRAVITY_Y));
+    const defaultLaunchVelocity = Math.sqrt(2 * gravityMagnitude * JUMP_HEIGHT);
+    localPlayer.jumpState = {
+      phase: "windup",
+      timer: 0,
+      jumpAnimName,
+      windupDuration: localPlayer.config.movement?.jumpWindup ?? 0.12,
+      launchVelocity: localPlayer.config.movement?.jumpVelocity ?? defaultLaunchVelocity,
+      recoverDuration: localPlayer.config.movement?.jumpRecover ?? 0.18,
+      animatedPhase: null,
+      landed: false
+    };
+    localPlayer._grounded = true;
+    localPlayer._velY = 0;
+    playJumpPhase(localPlayer.animGroups, jumpAnimName, "windup");
+    localPlayer.currentAnim = jumpAnimName;
+    return true;
+  }
+
+  function setLocalPlayerState(position, rotation, collision, correctionVersion) {
+    if (!localPlayer) return;
+
+    if (typeof correctionVersion === "number") {
+      if (typeof localPlayer.lastAppliedCorrectionVersion === "number" &&
+          correctionVersion <= localPlayer.lastAppliedCorrectionVersion) {
+        return;
+      }
+      localPlayer.lastAppliedCorrectionVersion = correctionVersion;
+    }
+
+    if (collision) {
+      localPlayer.collision = sanitizeCollision(collision);
+    }
+
+    const nextPosition = new BABYLON.Vector3(position.x, position.y, position.z);
+    const collider = localPlayer.collider;
+
+    if (collider) {
+      const dist = BABYLON.Vector3.Distance(collider.position, nextPosition);
+
+      // Snap only when server correction is clearly large; otherwise blend in
+      // to avoid visible jitter while still respecting authoritative collisions.
+      if (dist > 1.0) {
+        collider.position.copyFrom(nextPosition);
+      } else if (dist > 0.03) {
+        collider.position = BABYLON.Vector3.Lerp(collider.position, nextPosition, 0.35);
+      }
+
+      if (typeof rotation === "number") {
+        let diff = rotation - localPlayer.root.rotation.y;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+
+        const nextRot = Math.abs(diff) > 1.0
+          ? rotation
+          : localPlayer.root.rotation.y + diff * 0.35;
+
+        localPlayer.root.rotation.y = nextRot;
+        collider.rotation.y = nextRot;
+      }
+
+      localPlayer.root.position.copyFrom(collider.position);
+      return;
+    }
+
+    localPlayer.root.position.copyFrom(nextPosition);
+    if (typeof rotation === "number") {
+      localPlayer.root.rotation.y = rotation;
     }
   }
 
@@ -441,6 +875,25 @@ export const Renderer = (() => {
   function updateLocalAnimation(isMoving, isRunning) {
     if (!localPlayer) return null;
     const anims = localPlayer.config.animations ?? {};
+
+    if (localPlayer.jumpState) {
+      const jumpState = localPlayer.jumpState;
+      const jumpAnimName = jumpState.jumpAnimName ?? (anims.jump ?? "Jump");
+
+      if (jumpState.animatedPhase !== jumpState.phase) {
+        playJumpPhase(localPlayer.animGroups, jumpAnimName, jumpState.phase);
+        jumpState.animatedPhase = jumpState.phase;
+      }
+
+      if (jumpState.phase === "recover" && jumpState.timer >= jumpState.recoverDuration && localPlayer._grounded) {
+        localPlayer.jumpState = null;
+        return updateLocalAnimation(isMoving, isRunning);
+      }
+
+      localPlayer.currentAnim = jumpAnimName;
+      return jumpAnimName;
+    }
+
     const targetAnim = isMoving
       ? (isRunning ? (anims.run ?? "Run") : (anims.walk ?? "Walk"))
       : (anims.idle ?? "Idle");
@@ -470,8 +923,23 @@ export const Renderer = (() => {
     const horizontalPerStep = delta.scale(1 / physicsSteps);
 
     const maxStep = 0.08;
-    const groundedEps = 1e-3;
+    // Tolerance for detecting ground contact — raised slightly to avoid
+    // tiny oscillations when gravity is high or floating-point error occurs.
+    const groundedEps = 0.02;
     const gravityY = scene?.gravity?.y ?? GRAVITY_Y;
+
+    const jumpState = localPlayer.jumpState;
+    if (jumpState) {
+      jumpState.timer += safeDt;
+
+      if (jumpState.phase === "windup" && jumpState.timer >= jumpState.windupDuration) {
+        jumpState.phase = "launch";
+        jumpState.timer = 0;
+        jumpState.animatedPhase = null;
+        localPlayer._velY = jumpState.launchVelocity;
+        localPlayer._grounded = false;
+      }
+    }
 
     let supported = localPlayer._grounded === true;
 
@@ -494,7 +962,23 @@ export const Renderer = (() => {
         }
 
         // In air, keep horizontal collision response from injecting extra vertical speed.
-        if (!supported) {
+        // On slopes, preserve upward ground-following movement, but snap back
+        // tiny downward corrections so the collider does not chatter on the incline.
+        const yAfterHorizontal = collider.position.y;
+
+        // Make slope tolerance scale with horizontal movement so faster
+        // movement (sprinting) allows slightly larger micro-step corrections
+        // without producing visible jitter. Clamp the added tolerance so
+        // we don't swallow meaningful collisions.
+        // For sprinting, allow larger micro-step tolerance to avoid jitter.
+        // Increase multiplier and clamp so faster movement tolerates more.
+        const slopeTolerance = groundedEps + Math.max(0, Math.min(horizontalDistance * 0.6, 0.3));
+
+        const smallDownwardCorrection =
+          yAfterHorizontal < yBeforeHorizontal &&
+          (yBeforeHorizontal - yAfterHorizontal) < slopeTolerance;
+
+        if (!supported || smallDownwardCorrection) {
           collider.position.y = yBeforeHorizontal;
         }
       }
@@ -515,27 +999,60 @@ export const Renderer = (() => {
         const verticalMoved = yAfterVertical - yBeforeVertical;
         const groundedNow = verticalStep < 0 && verticalMoved > verticalStep + groundedEps;
 
-        // Landing: reset accumulated fall acceleration immediately.
+        // Landing: reset accumulated fall acceleration immediately and
+        // snap the collider to the pre-vertical position to avoid tiny
+        // penetrations that can cause visual vibration.
         if (groundedNow) {
           localPlayer._velY = 0;
+          try {
+            collider.position.y = yBeforeVertical;
+          } catch (e) {
+            // If anything goes wrong with snapping, ignore and continue.
+          }
+
+          if (jumpState && jumpState.phase === "launch") {
+            jumpState.phase = "recover";
+            jumpState.timer = 0;
+            jumpState.animatedPhase = null;
+            jumpState.landed = true;
+          }
         }
 
         supported = groundedNow;
       }
 
       localPlayer._grounded = supported;
+      if (supported) {
+        localPlayer._lastGroundedAt = typeof performance !== "undefined" ? performance.now() : Date.now();
+      }
+
+      if (jumpState && jumpState.phase === "recover" && localPlayer._grounded && jumpState.timer >= jumpState.recoverDuration) {
+        localPlayer.jumpState = null;
+      }
     }
 
     // Sync visible root to collider position
     localPlayer.root.position.copyFrom(collider.position);
+    if (localPlayer.collider) {
+      localPlayer.collider.rotation.y = localPlayer.root.rotation.y;
+    }
   }
 
   // ── Camera follow ─────────────────────────────────────────────────────────
   function updateCameraTarget() {
     if (!localPlayer) return;
     const heightOffset = localPlayer.config.camera?.thirdPerson?.heightOffset ?? 2;
-    const target = localPlayer.root.position.add(new BABYLON.Vector3(0, heightOffset, 0));
-    camera.target = BABYLON.Vector3.Lerp(camera.target, target, 0.14);
+    const desiredTarget = localPlayer.root.position.add(new BABYLON.Vector3(0, heightOffset, 0));
+    
+    // Smoothly interpolate the camera target to reduce collision vibrations
+    camera.target.x += (desiredTarget.x - camera.target.x) * CAMERA_FOLLOW_SMOOTHING;
+    camera.target.y += (desiredTarget.y - camera.target.y) * CAMERA_FOLLOW_SMOOTHING;
+    camera.target.z += (desiredTarget.z - camera.target.z) * CAMERA_FOLLOW_SMOOTHING;
+
+    const isFirstPerson = camera.radius < CAMERA_THIRD_PERSON_MIN_RADIUS;
+    if (localPlayer.visualRoot) {
+      localPlayer.visualRoot.setEnabled(!isFirstPerson);
+    }
   }
 
   // ── Render loop ───────────────────────────────────────────────────────────
@@ -558,6 +1075,7 @@ export const Renderer = (() => {
     addRemotePlayer,
     removeRemotePlayer,
     updateRemotePlayer,
+    setLocalPlayerState,
     updateLocalAnimation,
     moveLocalWithCollisions,
     updateCameraTarget,
@@ -565,6 +1083,11 @@ export const Renderer = (() => {
     setLoadProgress,
     hideLoadingScreen,
     playAnim,
+    playJumpPhase,
+    equipSword,
+    unequipSword,
+    updateSwordPosition,
+    requestJump,
 
     getScene:   () => scene,
     getCamera:  () => camera,

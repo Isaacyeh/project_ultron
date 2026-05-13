@@ -1,0 +1,11 @@
+{
+  "_comment": "Character registry for character-id based selection. Use ?character=<id> or ?characterId=<id> in the URL.",
+  "defaultCharacterId": "base",
+  "characters": [
+    {
+      "id": "base",
+      "label": "Base Character",
+      "config": "characters/BaseCharacter.json"
+    }
+  ]
+}

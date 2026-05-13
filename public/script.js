@@ -7,10 +7,12 @@
 "use strict";
 
 import { Renderer } from "./render.js";
+import { CAMERA_FIRST_PERSON_RADIUS, CAMERA_THIRD_PERSON_MAX_RADIUS } from "./variables.js";
 
 // ── Configs (loaded from JSON) ─────────────────────────────────────────────
 let charConfig = null;
 let mapConfig  = null;
+let selectedCharacterId = null;
 let selectedMapId = null;
 
 // ── Input state ────────────────────────────────────────────────────────────
@@ -31,6 +33,13 @@ let selfId       = null;
 const SEND_RATE  = 50; // ms between network sends
 let lastSend     = 0;
 
+// ── Sword state ────────────────────────────────────────────────────────────
+let swordEquipped = false;
+let isAttacking = false;
+let currentAttackAnim = null;
+let attackCooldown = 0;
+const ATTACK_COOLDOWN = 0.6; // seconds between attacks
+
 // ── Movement ───────────────────────────────────────────────────────────────
 const WALK_SPEED = 1;
 const RUN_SPEED  = 2;
@@ -47,6 +56,66 @@ async function fetchJSON(url) {
 function pickMapIdFromURL() {
   const params = new URLSearchParams(window.location.search);
   return params.get("map") || params.get("mapId") || null;
+}
+
+function pickCharacterIdFromURL() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("character") || params.get("characterId") || null;
+}
+
+async function loadCharacterConfigFromId() {
+  const requestedCharacterId = pickCharacterIdFromURL();
+
+  let characterIndex = null;
+  try {
+    characterIndex = await fetchJSON("/assets/characters.json");
+  } catch (_err) {
+    // Fallback for projects that only have a single character config.
+  }
+
+  if (characterIndex && Array.isArray(characterIndex.characters) && characterIndex.characters.length > 0) {
+    const defaultCharacterId = characterIndex.defaultCharacterId || characterIndex.characters[0].id;
+    selectedCharacterId = requestedCharacterId || defaultCharacterId;
+
+    let selectedCharacter = characterIndex.characters.find(c => c.id === selectedCharacterId);
+    if (!selectedCharacter) {
+      console.warn(`[Character] Unknown character id '${selectedCharacterId}', falling back to '${defaultCharacterId}'.`);
+      selectedCharacterId = defaultCharacterId;
+      selectedCharacter = characterIndex.characters.find(c => c.id === selectedCharacterId);
+    }
+
+    if (!selectedCharacter || !selectedCharacter.config) {
+      throw new Error("characters.json is missing a valid character entry with a config path.");
+    }
+
+    const characterPath = selectedCharacter.config.startsWith("/")
+      ? selectedCharacter.config
+      : `/assets/${selectedCharacter.config}`;
+
+    const config = await fetchJSON(characterPath);
+    config.id = config.id || selectedCharacterId;
+    return config;
+  }
+
+  selectedCharacterId = requestedCharacterId || "base";
+  const legacyPath = selectedCharacterId === "base"
+    ? "/assets/characters/BaseCharacter.json"
+    : `/assets/characters/${selectedCharacterId}.json`;
+
+  try {
+    const config = await fetchJSON(legacyPath);
+    config.id = config.id || selectedCharacterId;
+    return config;
+  } catch (err) {
+    if (legacyPath !== "/assets/characters/BaseCharacter.json") {
+      console.warn(`[Character] Failed to load '${legacyPath}', falling back to '/assets/characters/BaseCharacter.json'.`);
+      selectedCharacterId = "base";
+      const config = await fetchJSON("/assets/characters/BaseCharacter.json");
+      config.id = config.id || selectedCharacterId;
+      return config;
+    }
+    throw err;
+  }
 }
 
 async function loadMapConfigFromId() {
@@ -119,8 +188,9 @@ async function main() {
   try {
     Renderer.setLoadProgress(5, "Fetching configs…");
 
-    charConfig = await fetchJSON("/assets/characters/BaseCharacter.json");
+    charConfig = await loadCharacterConfigFromId();
     mapConfig = await loadMapConfigFromId();
+    console.log(`[Character] Using character id: ${charConfig.id}`);
     console.log(`[Map] Using map id: ${mapConfig.id}`);
 
     // Apply JSON-driven speeds to Renderer constants
@@ -171,7 +241,8 @@ function connectSocket() {
     // Init: we receive our own state + all existing players
     socket.on("init", async ({ self, players }) => {
       for (const p of players) {
-        await Renderer.addRemotePlayer(p.id, charConfig, p.position);
+        await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
+        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision, p.jumpPhase);
       }
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
       resolve();
@@ -179,7 +250,8 @@ function connectSocket() {
 
     socket.on("playerJoined", async (p) => {
       addSystemMsg(`${p.name} joined.`);
-      await Renderer.addRemotePlayer(p.id, charConfig, p.position);
+      await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
+      Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision, p.jumpPhase);
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
     });
 
@@ -189,14 +261,22 @@ function connectSocket() {
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
     });
 
-    socket.on("playerUpdated", ({ id, position, rotation, animation }) => {
-      Renderer.updateRemotePlayer(id, position, rotation, animation);
+    socket.on("playerUpdated", (payload) => {
+      const { id, position, rotation, animation, swordEquipped, collision, correctionVersion, jumpPhase } = payload;
+      if (id === selfId) {
+        Renderer.setLocalPlayerState(position, rotation, collision, correctionVersion);
+        return;
+      }
+      Renderer.updateRemotePlayer(id, position, rotation, animation, swordEquipped, collision, jumpPhase);
     });
 
     socket.on("worldState", ({ players }) => {
       players.forEach(p => {
-        if (p.id === selfId) return;
-        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation);
+        if (p.id === selfId) {
+          Renderer.setLocalPlayerState(p.position, p.rotation, p.collision, p.correctionVersion);
+          return;
+        }
+        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision, p.jumpPhase);
       });
     });
 
@@ -217,6 +297,27 @@ function onFrame(dt) {
 
   const scene  = Renderer.getScene();
   const camera = Renderer.getCamera();
+
+  // ── Update sword state ─────────────────────────────────────────────────
+  if (swordEquipped && player.sword) {
+    Renderer.updateSwordPosition(player);
+  }
+
+  // ── Attack cooldown and state ──────────────────────────────────────────
+  if (attackCooldown > 0) {
+    attackCooldown -= dt;
+  }
+
+  // Check if attack animation has finished
+  if (isAttacking && player.animGroups) {
+    const attackAnim = currentAttackAnim
+      ? player.animGroups.find(ag => ag.name === currentAttackAnim)
+      : null;
+    if (!attackAnim || !attackAnim.isPlaying) {
+      isAttacking = false;
+      currentAttackAnim = null;
+    }
+  }
 
   // ── Arrow key camera rotation ──────────────────────────────────────────
   if (!chatFocused) {
@@ -273,7 +374,11 @@ function onFrame(dt) {
   updateVelocityReadout(player, previousPosition, dt);
 
   // ── Animation ─────────────────────────────────────────────────────────
-  const animName = Renderer.updateLocalAnimation(isMoving, isRunning);
+  // Don't update base animation if attacking (attack animation takes priority)
+  let animName = player.currentAnim;
+  if (!isAttacking) {
+    animName = Renderer.updateLocalAnimation(isMoving, isRunning);
+  }
 
   // ── Camera follow ──────────────────────────────────────────────────────
   Renderer.updateCameraTarget();
@@ -289,7 +394,10 @@ function onFrame(dt) {
         z: player.root.position.z
       },
       rotation:  player.root.rotation.y,
-      animation: animName
+      animation: animName,
+      jumpPhase: player.jumpState?.phase ?? null,
+      swordEquipped,
+      collision: player.collision
     });
   }
 }
@@ -298,6 +406,10 @@ function onFrame(dt) {
 function setupInput() {
   const canvas = Renderer.getEngine().getRenderingCanvas();
 
+  function isJumpKey(e) {
+    return e.code === "Space" || e.code === "Spacebar" || e.key === " " || e.key === "Spacebar";
+  }
+
   document.addEventListener("keydown", (e) => {
     // Escape exits pointer lock
     if (e.key === "Escape") {
@@ -305,7 +417,58 @@ function setupInput() {
       return;
     }
 
+    // Handle "1" key for sword equip/unequip
+    if (e.key === "1" && !chatFocused) {
+      swordEquipped = !swordEquipped;
+      const player = Renderer.getPlayer();
+      if (player) {
+        if (swordEquipped) {
+          Renderer.equipSword(player);
+        } else {
+          Renderer.unequipSword(player);
+        }
+
+        if (socket) {
+          socket.emit("playerUpdate", {
+            position: {
+              x: player.root.position.x,
+              y: player.root.position.y,
+              z: player.root.position.z
+            },
+            rotation: player.root.rotation.y,
+            animation: player.currentAnim,
+            swordEquipped,
+            collision: player.collision
+          });
+        }
+      }
+      e.preventDefault();
+      return;
+    }
+
     if (chatFocused) return;
+    if (isJumpKey(e)) {
+      const started = Renderer.requestJump();
+      if (started) {
+        const player = Renderer.getPlayer();
+        if (player && socket) {
+          socket.emit("playerUpdate", {
+            position: {
+              x: player.root.position.x,
+              y: player.root.position.y,
+              z: player.root.position.z
+            },
+            rotation: player.root.rotation.y,
+            animation: player.currentAnim,
+            jumpPhase: player.jumpState?.phase ?? null,
+            swordEquipped,
+            collision: player.collision
+          });
+        }
+      }
+      e.preventDefault();
+      return;
+    }
     if (keys.hasOwnProperty(e.key)) { keys[e.key] = true; e.preventDefault(); }
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
       keys[e.code] = true;
@@ -330,9 +493,53 @@ function setupInput() {
     }
   });
 
-  // Mouse drag for camera rotation
+  // Mouse drag for camera rotation and attacks
   canvas.addEventListener("mousedown", (e) => {
-    if (e.button === 2 || e.button === 0) {
+    if (e.button === 0) {
+      // Left click: perform sword attack if equipped and not on cooldown
+      if (swordEquipped && !isAttacking && attackCooldown <= 0) {
+        isAttacking = true;
+        attackCooldown = ATTACK_COOLDOWN;
+        const player = Renderer.getPlayer();
+        if (player) {
+          // Prefer "SwordSlash" animation if available, fall back to "Punch"
+          const preferred = (player.config.animations && player.config.animations.swordSlash) ? player.config.animations.swordSlash : "SwordSlash";
+          const hasSwordSlash = player.animGroups && player.animGroups.some(ag => ag.name === preferred);
+          const fallback = player.animGroups && player.animGroups.some(ag => ag.name === "Punch");
+          if (hasSwordSlash) {
+            Renderer.playAnim(player.animGroups, preferred, false);
+            player.currentAnim = preferred;
+            currentAttackAnim = preferred;
+          } else if (fallback) {
+            Renderer.playAnim(player.animGroups, "Punch", false);
+            player.currentAnim = "Punch";
+            currentAttackAnim = "Punch";
+          } else {
+            // As a last resort, stop updating animations briefly
+            isAttacking = false;
+            currentAttackAnim = null;
+          }
+
+          if (socket) {
+            socket.emit("playerUpdate", {
+              position: {
+                x: player.root.position.x,
+                y: player.root.position.y,
+                z: player.root.position.z
+              },
+              rotation: player.root.rotation.y,
+              animation: player.currentAnim,
+              jumpPhase: player.jumpState?.phase ?? null,
+              swordEquipped,
+              collision: player.collision
+            });
+          }
+        }
+      }
+      mouseDown = true;
+      lastMouseX = e.clientX;
+      lastMouseY = e.clientY;
+    } else if (e.button === 2) {
       mouseDown = true;
       lastMouseX = e.clientX;
       lastMouseY = e.clientY;
@@ -357,9 +564,8 @@ function setupInput() {
   // Scroll wheel zoom
   canvas.addEventListener("wheel", (e) => {
     const cam = Renderer.getCamera();
-    const tp  = charConfig?.camera?.thirdPerson;
-    const min = tp?.lowerRadiusLimit ?? 2;
-    const max = tp?.upperRadiusLimit ?? 20;
+    const min = CAMERA_FIRST_PERSON_RADIUS;
+    const max = CAMERA_THIRD_PERSON_MAX_RADIUS;
     cam.radius = Math.max(min, Math.min(max, cam.radius + e.deltaY * 0.02));
     e.preventDefault();
   }, { passive: false });
