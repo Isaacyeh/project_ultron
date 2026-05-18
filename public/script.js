@@ -7,7 +7,7 @@
 "use strict";
 
 import { Renderer } from "./render.js";
-import { CAMERA_FIRST_PERSON_RADIUS, CAMERA_THIRD_PERSON_MAX_RADIUS } from "./variables.js";
+import { CAMERA_FIRST_PERSON_RADIUS, CAMERA_THIRD_PERSON_MAX_RADIUS, DEBUG, PISTOL_DAMAGE, PISTOL_SHOT_DELAY_MS } from "./variables.js";
 
 // ── Configs (loaded from JSON) ─────────────────────────────────────────────
 let charConfig = null;
@@ -19,7 +19,8 @@ let selectedMapId = null;
 const keys = {
   w: false, a: false, s: false, d: false,
   ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false,
-  ShiftLeft: false, ShiftRight: false
+  ShiftLeft: false, ShiftRight: false,
+  AltLeft: false, AltRight: false
 };
 
 let chatFocused  = false;
@@ -35,10 +36,14 @@ let lastSend     = 0;
 
 // ── Sword state ────────────────────────────────────────────────────────────
 let swordEquipped = false;
+let gunEquipped = false;
 let isAttacking = false;
 let currentAttackAnim = null;
 let attackCooldown = 0;
+let localHealth = 100;
+let strafeModeEnabled = false;
 const ATTACK_COOLDOWN = 0.6; // seconds between attacks
+const MAX_HEALTH = 100;
 
 // ── Movement ───────────────────────────────────────────────────────────────
 const WALK_SPEED = 1;
@@ -240,9 +245,10 @@ function connectSocket() {
 
     // Init: we receive our own state + all existing players
     socket.on("init", async ({ self, players }) => {
+      applyLocalHealth(self?.health ?? MAX_HEALTH);
       for (const p of players) {
-        await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
-        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision, p.jumpPhase);
+        await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision, p.health);
+        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.gunEquipped, p.collision, p.jumpPhase, p.health);
       }
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
       resolve();
@@ -250,8 +256,8 @@ function connectSocket() {
 
     socket.on("playerJoined", async (p) => {
       addSystemMsg(`${p.name} joined.`);
-      await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision);
-      Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision, p.jumpPhase);
+      await Renderer.addRemotePlayer(p.id, charConfig, p.position, p.collision, p.health);
+      Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.gunEquipped, p.collision, p.jumpPhase, p.health);
       updateOnlineCount(Object.keys(Renderer.getRemotes()).length + 1);
     });
 
@@ -262,21 +268,23 @@ function connectSocket() {
     });
 
     socket.on("playerUpdated", (payload) => {
-      const { id, position, rotation, animation, swordEquipped, collision, correctionVersion, jumpPhase } = payload;
+      const { id, position, rotation, animation, swordEquipped, gunEquipped, collision, correctionVersion, jumpPhase, health } = payload;
       if (id === selfId) {
-        Renderer.setLocalPlayerState(position, rotation, collision, correctionVersion);
+        Renderer.setLocalPlayerState(position, rotation, collision, correctionVersion, health);
+        applyLocalHealth(health);
         return;
       }
-      Renderer.updateRemotePlayer(id, position, rotation, animation, swordEquipped, collision, jumpPhase);
+      Renderer.updateRemotePlayer(id, position, rotation, animation, swordEquipped, gunEquipped, collision, jumpPhase, health);
     });
 
     socket.on("worldState", ({ players }) => {
       players.forEach(p => {
         if (p.id === selfId) {
-          Renderer.setLocalPlayerState(p.position, p.rotation, p.collision, p.correctionVersion);
+          Renderer.setLocalPlayerState(p.position, p.rotation, p.collision, p.correctionVersion, p.health);
+          applyLocalHealth(p.health);
           return;
         }
-        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.collision, p.jumpPhase);
+        Renderer.updateRemotePlayer(p.id, p.position, p.rotation, p.animation, p.swordEquipped, p.gunEquipped, p.collision, p.jumpPhase, p.health);
       });
     });
 
@@ -301,6 +309,10 @@ function onFrame(dt) {
   // ── Update sword state ─────────────────────────────────────────────────
   if (swordEquipped && player.sword) {
     Renderer.updateSwordPosition(player);
+  }
+
+  if (gunEquipped && player.gun) {
+    Renderer.updateGunPosition(player);
   }
 
   // ── Attack cooldown and state ──────────────────────────────────────────
@@ -340,6 +352,13 @@ function onFrame(dt) {
 
   const right = BABYLON.Vector3.Cross(BABYLON.Vector3.Up(), camDir).normalize();
 
+  if (strafeModeEnabled) {
+    const camFacing = camera.target.subtract(camera.position);
+    camFacing.y = 0;
+    camFacing.normalize();
+    player.root.rotation.y = Math.atan2(camFacing.x, camFacing.z);
+  }
+
   let move = BABYLON.Vector3.Zero();
   let isMoving = false;
 
@@ -356,16 +375,18 @@ function onFrame(dt) {
     const frameScale = Math.min(dt * 60, 2);
     move.normalize().scaleInPlace(speed * frameScale);
 
-    // Rotate character to face movement direction
-    const targetAngle = Math.atan2(move.x, move.z);
-    let currentAngle  = player.root.rotation.y;
-    let diff = targetAngle - currentAngle;
-    // Wrap to [-π, π]
-    while (diff >  Math.PI) diff -= Math.PI * 2;
-    while (diff < -Math.PI) diff += Math.PI * 2;
-    // Use turnSpeed from config, defaulting to 0.15
-    const turnSpeed = charConfig.movement?.turnSpeed ?? 0.15;
-    player.root.rotation.y += diff * turnSpeed;
+    if (!strafeModeEnabled) {
+      // Rotate character to face movement direction
+      const targetAngle = Math.atan2(move.x, move.z);
+      let currentAngle  = player.root.rotation.y;
+      let diff = targetAngle - currentAngle;
+      // Wrap to [-π, π]
+      while (diff >  Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      // Use turnSpeed from config, defaulting to 0.15
+      const turnSpeed = charConfig.movement?.turnSpeed ?? 0.15;
+      player.root.rotation.y += diff * turnSpeed;
+    }
   }
 
   // Always call moveLocalWithCollisions so gravity is applied even when player isn't moving.
@@ -397,6 +418,7 @@ function onFrame(dt) {
       animation: animName,
       jumpPhase: player.jumpState?.phase ?? null,
       swordEquipped,
+      gunEquipped,
       collision: player.collision
     });
   }
@@ -417,15 +439,28 @@ function setupInput() {
       return;
     }
 
-    // Handle "1" key for sword equip/unequip
-    if (e.key === "1" && !chatFocused) {
-      swordEquipped = !swordEquipped;
+    // Handle weapon keys for equip/unequip
+    if ((e.key === "1" || e.key === "2") && !chatFocused) {
+      const equipGunKey = e.key === "2";
+      if (equipGunKey) {
+        gunEquipped = !gunEquipped;
+      } else {
+        swordEquipped = !swordEquipped;
+      }
       const player = Renderer.getPlayer();
       if (player) {
-        if (swordEquipped) {
-          Renderer.equipSword(player);
+        if (equipGunKey) {
+          if (gunEquipped) {
+            Renderer.equipGun(player);
+          } else {
+            Renderer.unequipGun(player);
+          }
         } else {
-          Renderer.unequipSword(player);
+          if (swordEquipped) {
+            Renderer.equipSword(player);
+          } else {
+            Renderer.unequipSword(player);
+          }
         }
 
         if (socket) {
@@ -437,6 +472,7 @@ function setupInput() {
             },
             rotation: player.root.rotation.y,
             animation: player.currentAnim,
+            gunEquipped,
             swordEquipped,
             collision: player.collision
           });
@@ -461,6 +497,7 @@ function setupInput() {
             rotation: player.root.rotation.y,
             animation: player.currentAnim,
             jumpPhase: player.jumpState?.phase ?? null,
+            gunEquipped,
             swordEquipped,
             collision: player.collision
           });
@@ -473,6 +510,12 @@ function setupInput() {
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
       keys[e.code] = true;
     }
+    if (e.code === "AltLeft" || e.code === "AltRight") {
+      if (!e.repeat) {
+        strafeModeEnabled = !strafeModeEnabled;
+      }
+      e.preventDefault();
+    }
     // Arrow keys
     const arrowMap = { ArrowUp: true, ArrowDown: true, ArrowLeft: true, ArrowRight: true };
     if (arrowMap[e.key]) { keys[e.key] = true; e.preventDefault(); }
@@ -483,6 +526,7 @@ function setupInput() {
     if (e.code === "ShiftLeft" || e.code === "ShiftRight") {
       keys[e.code] = false;
     }
+    if (e.code === "AltLeft" || e.code === "AltRight") e.preventDefault();
   });
 
   // Request pointer lock on canvas click
@@ -496,24 +540,45 @@ function setupInput() {
   // Mouse drag for camera rotation and attacks
   canvas.addEventListener("mousedown", (e) => {
     if (e.button === 0) {
-      // Left click: perform sword attack if equipped and not on cooldown
-      if (swordEquipped && !isAttacking && attackCooldown <= 0) {
+      // Left click: perform weapon attack if equipped and not on cooldown
+      if ((swordEquipped || gunEquipped) && !isAttacking && attackCooldown <= 0) {
         isAttacking = true;
         attackCooldown = ATTACK_COOLDOWN;
         const player = Renderer.getPlayer();
         if (player) {
-          // Prefer "SwordSlash" animation if available, fall back to "Punch"
-          const preferred = (player.config.animations && player.config.animations.swordSlash) ? player.config.animations.swordSlash : "SwordSlash";
-          const hasSwordSlash = player.animGroups && player.animGroups.some(ag => ag.name === preferred);
-          const fallback = player.animGroups && player.animGroups.some(ag => ag.name === "Punch");
-          if (hasSwordSlash) {
-            Renderer.playAnim(player.animGroups, preferred, false);
-            player.currentAnim = preferred;
-            currentAttackAnim = preferred;
-          } else if (fallback) {
-            Renderer.playAnim(player.animGroups, "Punch", false);
-            player.currentAnim = "Punch";
-            currentAttackAnim = "Punch";
+          let animToPlay = null;
+          let fallbackAnim = null;
+
+          if (gunEquipped) {
+            // Play shooting animation for gun
+            const preferred = (player.config.animations && player.config.animations.shoot) ? player.config.animations.shoot : "Shoot";
+            const hasShoot = player.animGroups && player.animGroups.some(ag => ag.name === preferred);
+            if (hasShoot) {
+              animToPlay = preferred;
+            } else {
+              fallbackAnim = "Punch";
+            }
+            // Also play the gun's firing animation from the GLB
+            Renderer.playWeaponAnim("gun", "PistolArmature|Fire", false);
+          } else {
+            // Play sword slash animation for sword
+            const preferred = (player.config.animations && player.config.animations.swordSlash) ? player.config.animations.swordSlash : "SwordSlash";
+            const hasSwordSlash = player.animGroups && player.animGroups.some(ag => ag.name === preferred);
+            if (hasSwordSlash) {
+              animToPlay = preferred;
+            } else {
+              fallbackAnim = "Punch";
+            }
+          }
+
+          if (animToPlay) {
+            Renderer.playAnim(player.animGroups, animToPlay, false);
+            player.currentAnim = animToPlay;
+            currentAttackAnim = animToPlay;
+          } else if (fallbackAnim && player.animGroups && player.animGroups.some(ag => ag.name === fallbackAnim)) {
+            Renderer.playAnim(player.animGroups, fallbackAnim, false);
+            player.currentAnim = fallbackAnim;
+            currentAttackAnim = fallbackAnim;
           } else {
             // As a last resort, stop updating animations briefly
             isAttacking = false;
@@ -530,9 +595,44 @@ function setupInput() {
               rotation: player.root.rotation.y,
               animation: player.currentAnim,
               jumpPhase: player.jumpState?.phase ?? null,
+              gunEquipped,
               swordEquipped,
               collision: player.collision
             });
+
+            if (gunEquipped) {
+              window.setTimeout(() => {
+                if (!socket) return;
+                const rayData = Renderer.getWeaponRayData("gun");
+                if (rayData) {
+                  socket.emit("damagePlayer", {
+                    weaponType: "gun",
+                    damage: PISTOL_DAMAGE,
+                    rayOrigin: {
+                      x: rayData.origin.x,
+                      y: rayData.origin.y,
+                      z: rayData.origin.z
+                    },
+                    rayDirection: {
+                      x: rayData.direction.x,
+                      y: rayData.direction.y,
+                      z: rayData.direction.z
+                    },
+                    rayLength: rayData.length
+                  });
+                }
+                Renderer.showWeaponRay(rayData);
+              }, PISTOL_SHOT_DELAY_MS);
+            } else {
+              const targetId = pickAttackTarget("sword");
+              if (targetId) {
+                socket.emit("damagePlayer", {
+                  targetId,
+                  weaponType: "sword",
+                  damage: undefined
+                });
+              }
+            }
           }
         }
       }
@@ -631,6 +731,69 @@ function escapeHtml(str) {
   return str.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
 
+function clampHealth(value) {
+  const health = Number(value);
+  if (!Number.isFinite(health)) return MAX_HEALTH;
+  return Math.max(0, Math.min(MAX_HEALTH, Math.round(health)));
+}
+
+function applyLocalHealth(health) {
+  localHealth = clampHealth(health);
+  updateLocalHealthHUD(localHealth);
+}
+
+function updateLocalHealthHUD(health) {
+  const healthBar = document.getElementById("health-bar");
+  const healthValue = document.getElementById("health-value");
+  const pct = clampHealth(health);
+
+  if (healthBar) {
+    healthBar.style.width = `${pct}%`;
+    const red = Math.round(255 * (1 - pct / MAX_HEALTH));
+    const green = Math.round(232 * (pct / MAX_HEALTH));
+    healthBar.style.background = `linear-gradient(90deg, rgb(${red}, ${green}, 122), rgb(${Math.max(90, red - 35)}, ${Math.max(70, green - 60)}, 70))`;
+  }
+
+  if (healthValue) {
+    healthValue.textContent = `${pct} / ${MAX_HEALTH}`;
+  }
+}
+
+function pickAttackTarget(weaponType) {
+  const player = Renderer.getPlayer();
+  if (!player) return null;
+
+  const remotes = Renderer.getRemotes();
+  const origin = player.root.position;
+  const forward = new BABYLON.Vector3(Math.sin(player.root.rotation.y), 0, Math.cos(player.root.rotation.y));
+  const maxRange = 3;
+  const minDot = 0.35;
+
+  let bestTarget = null;
+  let bestDistance = Infinity;
+
+  for (const [id, remote] of Object.entries(remotes)) {
+    if (!remote?.root || remote.health <= 0) continue;
+
+    const delta = remote.root.position.subtract(origin);
+    delta.y = 0;
+
+    const distance = delta.length();
+    if (distance < 0.1 || distance > maxRange) continue;
+
+    delta.normalize();
+    const dot = BABYLON.Vector3.Dot(forward, delta);
+    if (dot < minDot) continue;
+
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestTarget = id;
+    }
+  }
+
+  return bestTarget;
+}
+
 // ── HUD updates ────────────────────────────────────────────────────────────
 function updateHUD() {
   // Player name from socket id
@@ -638,17 +801,30 @@ function updateHUD() {
     const pn = document.getElementById("player-name");
     if (pn) pn.textContent = `Player_${selfId.slice(0, 4).toUpperCase()}`;
   }
+
+  syncDebugHud();
+  updateLocalHealthHUD(localHealth);
 }
 
 function updateVelocityReadout(player, previousPosition, dt) {
   const value = document.getElementById("velocity-value");
-  if (!value || !player || !previousPosition || dt <= 0) return;
+  if (!value) return;
+
+  syncDebugHud();
+  if (!DEBUG || !player || !previousPosition || dt <= 0) return;
 
   const displacement = player.root.position.subtract(previousPosition);
   const speed = displacement.length() / dt;
   const verticalSpeed = displacement.y / dt;
 
   value.textContent = `Speed ${Math.round(speed)} u/s · Y ${Math.round(verticalSpeed)} u/s`;
+}
+
+function syncDebugHud() {
+  const readout = document.getElementById("velocity-readout");
+  if (!readout) return;
+
+  readout.style.display = DEBUG ? "" : "none";
 }
 
 function updateOnlineCount(n) {

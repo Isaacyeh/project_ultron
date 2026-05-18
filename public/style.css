@@ -47,6 +47,41 @@ body {
   padding: 16px;
 }
 
+#health-hud {
+  position: absolute;
+  left: 16px;
+  bottom: 16px;
+  pointer-events: none;
+}
+
+#health-panel {
+  width: 280px;
+  background: var(--glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  backdrop-filter: blur(8px);
+}
+
+#health-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+
+#health-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+  line-height: 1;
+}
+
 /* Top row */
 #hud-top {
   display: flex;
@@ -96,9 +131,9 @@ body {
 
 #health-bar-wrap {
   position: relative;
-  height: 8px;
+  height: 12px;
   background: rgba(255,255,255,0.08);
-  border-radius: 4px;
+  border-radius: 999px;
   overflow: hidden;
 }
 
@@ -106,16 +141,23 @@ body {
   height: 100%;
   width: 100%;
   background: linear-gradient(90deg, var(--success), #00b857);
-  border-radius: 4px;
+  border-radius: 999px;
   transition: width 0.3s ease, background 0.3s;
 }
 
 #health-label {
-  position: absolute;
-  right: 0;
-  top: -18px;
   font-size: 10px;
   color: var(--text-dim);
+}
+
+#health-value-row {
+  display: none;
+}
+
+#health-value {
+  color: var(--text);
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 #player-count {
@@ -139,28 +181,9 @@ body {
 /* Bottom row */
 #hud-bottom {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: flex-end;
   gap: 12px;
-}
-
-#controls-hint {
-  background: var(--glass);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius);
-  padding: 8px 14px;
-  font-size: 10px;
-  color: var(--text-dim);
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  line-height: 1.5;
-  backdrop-filter: blur(8px);
-}
-
-#controls-hint span::before {
-  content: '▸ ';
-  color: var(--accent);
 }
 
 /* Chat panel */

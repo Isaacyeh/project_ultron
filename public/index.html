@@ -20,10 +20,6 @@
     <div id="hud-top">
       <div id="player-info">
         <span id="player-name">Player</span>
-        <div id="health-bar-wrap">
-          <div id="health-bar"></div>
-          <span id="health-label">100</span>
-        </div>
         <div id="velocity-readout">
           <span class="stat-label">Velocity</span>
           <span id="velocity-value">Speed 0.00 u/s · Y 0.00 u/s</span>
@@ -37,13 +33,19 @@
       </div>
     </div>
 
-    <div id="hud-bottom">
-      <div id="controls-hint">
-        <span>WASD · Move</span>
-        <span>↑↓←→ / Mouse · Camera</span>
-        <span>Shift · Run</span>
+    <div id="health-hud">
+      <div id="health-panel">
+        <div id="health-header">
+          <span id="health-title">Health:</span>
+          <span id="health-value">100 / 100</span>
+        </div>
+        <div id="health-bar-wrap">
+          <div id="health-bar"></div>
+        </div>
       </div>
+    </div>
 
+    <div id="hud-bottom">
       <div id="chat-panel">
         <div id="chat-log"></div>
         <div id="chat-input-row">

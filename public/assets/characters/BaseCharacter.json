@@ -21,6 +21,7 @@
     "death":    "Death",
     "defeat":   "Defeat",
     "punch":    "Punch",
+    "shoot":    "Shoot_OneHanded",
     "roll":     "Roll",
     "pickup":   "PickUp"
   },
