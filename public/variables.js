@@ -1,7 +1,14 @@
+export const DEBUG = false;
+
 // Gravity variables
 export const GRAVITY_Y = -50;
 export const TERMINAL_VELOCITY = -50;
 export const JUMP_HEIGHT = 5;
+
+// Gun variables
+export const GUN_DAMAGE = 10;
+export const PISTOL_DAMAGE = 10;
+export const PISTOL_SHOT_DELAY_MS = 100;
 
 // Camera Variables
 export const CAMERA_FIRST_PERSON_RADIUS = 0.2;

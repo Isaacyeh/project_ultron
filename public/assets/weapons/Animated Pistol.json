@@ -1,0 +1,8 @@
+{
+  "file": "weapons/Animated Pistol.glb",
+  "attachBone": "Fist.R",
+  "hiltOffset": { "x": 0, "y": 0.45, "z": 0.3 },
+  "hiltRotation": { "x": -1.57079632679, "y": 0, "z": 1.57079632679 },
+  "scale": 7.5,
+  "notes": "Tune hiltOffset and hiltRotation until the pistol sits correctly in the right hand. If the model uses a different bone name, set attachBone accordingly."
+}

@@ -12,6 +12,7 @@ import {
   CAMERA_THIRD_PERSON_MAX_RADIUS,
   CAMERA_THIRD_PERSON_MIN_RADIUS,
   CAMERA_FOLLOW_SMOOTHING,
+  DEBUG,
   GRAVITY_Y,
   TERMINAL_VELOCITY,
   JUMP_HEIGHT
@@ -76,29 +77,154 @@ export const Renderer = (() => {
     return !/(slash|attack)/i.test(name);
   }
 
-  // ── Sword loading and positioning ──────────────────────────────────────
-  function loadSwordModel(player) {
+  const SWORD_DEFAULTS = {
+    file: "weapons/Katana Sword.glb",
+    attachBone: "RightHand",
+    hiltOffset: { x: 0.35, y: 1.5, z: 0.2 },
+    hiltRotation: { x: 0.15, y: 0, z: 0 }
+  };
+
+  const GUN_DEFAULTS = {
+    file: "weapons/Animated Pistol.glb",
+    attachBone: "RightHand",
+    hiltOffset: { x: 0.25, y: 1.25, z: 0.15 },
+    hiltRotation: { x: 0.05, y: 0, z: 0 }
+  };
+
+  function clampHealth(value) {
+    const health = Number(value);
+    if (!Number.isFinite(health)) return 100;
+    return Math.max(0, Math.min(100, Math.round(health)));
+  }
+
+  function getMarkerHeight(playerHeight) {
+    return Math.max(2.0, Number(playerHeight) + 0.35);
+  }
+
+  function healthColor(health) {
+    const pct = clampHealth(health) / 100;
+    const red = Math.round(255 * (1 - pct));
+    const green = Math.round(232 * pct);
+    return `rgb(${red}, ${green}, 122)`;
+  }
+
+  function drawHealthTexture(texture, health, label) {
+    const ctx = texture.getContext();
+    const size = texture.getSize();
+    const width = size.width || 256;
+    const height = size.height || 48;
+    const pct = clampHealth(health) / 100;
+
+    ctx.save();
+    ctx.clearRect(0, 0, width, height);
+    ctx.translate(0, height);
+    ctx.scale(1, -1);
+
+    ctx.fillStyle = "rgba(8, 16, 28, 0.82)";
+    ctx.strokeStyle = "rgba(0, 200, 255, 0.55)";
+    ctx.lineWidth = 3;
+    roundRect(ctx, 2, 2, width - 4, height - 4, 8, true, true);
+
+    ctx.fillStyle = "rgba(255, 255, 255, 0.08)";
+    roundRect(ctx, 8, 16, width - 16, 14, 7, true, false);
+
+    ctx.fillStyle = healthColor(health);
+    roundRect(ctx, 8, 16, Math.max(6, (width - 16) * pct), 14, 7, true, false);
+
+    ctx.font = "bold 18px monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = "#d4eaff";
+    ctx.fillText(label, width / 2, 10);
+
+    ctx.restore();
+
+    texture.update(false);
+  }
+
+  function roundRect(ctx, x, y, w, h, r, fill, stroke) {
+    const radius = Math.min(r, w / 2, h / 2);
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.lineTo(x + w - radius, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+    ctx.lineTo(x + w, y + h - radius);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+    ctx.lineTo(x + radius, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+    ctx.lineTo(x, y + radius);
+    ctx.quadraticCurveTo(x, y, x + radius, y);
+    ctx.closePath();
+    if (fill) ctx.fill();
+    if (stroke) ctx.stroke();
+  }
+
+  function createRemoteHealthBar(label, parentMesh, playerHeight, initialHealth = 100) {
+    const plane = BABYLON.MeshBuilder.CreatePlane(
+      "health_" + label,
+      { width: 1.7, height: 0.28 },
+      scene
+    );
+    plane.parent = parentMesh;
+    plane.position = new BABYLON.Vector3(0, getMarkerHeight(playerHeight) + 0.18, 0);
+    plane.billboardMode = BABYLON.Mesh.BILLBOARDMODE_ALL;
+    plane.isPickable = false;
+
+    const texture = new BABYLON.DynamicTexture("health_tex_" + label, { width: 256, height: 48 }, scene, false);
+    texture.hasAlpha = true;
+    texture.wrapU = BABYLON.Texture.CLAMP_ADDRESSMODE;
+    texture.wrapV = BABYLON.Texture.CLAMP_ADDRESSMODE;
+
+    const material = new BABYLON.StandardMaterial("health_mat_" + label, scene);
+    material.diffuseTexture = texture;
+    material.emissiveTexture = texture;
+    material.opacityTexture = texture;
+    material.backFaceCulling = false;
+    material.disableLighting = true;
+    plane.material = material;
+
+    const health = clampHealth(initialHealth);
+    drawHealthTexture(texture, health, String(health));
+
+    return { plane, texture, material, health };
+  }
+
+  function updateRemoteHealthBar(healthBar, health) {
+    if (!healthBar || !healthBar.texture) return;
+    const nextHealth = clampHealth(health);
+    if (healthBar.health === nextHealth) return;
+    healthBar.health = nextHealth;
+    drawHealthTexture(healthBar.texture, nextHealth, String(nextHealth));
+  }
+
+  function updateRemoteMarkerPosition(nameTag, healthBar, collision) {
+    updateNameTagPosition(nameTag, collision);
+    if (!healthBar || !healthBar.plane) return;
+
+    const playerHeight = Number(collision?.height);
+    const tagHeight = Number.isFinite(playerHeight) && playerHeight > 0
+      ? getMarkerHeight(playerHeight)
+      : 2.6;
+
+    healthBar.plane.position.y = tagHeight + 0.18;
+  }
+
+  function loadHeldWeaponModel(player, weaponKey, label, defaults, configUrl) {
     return new Promise(async (resolve, reject) => {
-      if (player.sword) {
-        return resolve(player.sword);
+      if (player[weaponKey]) {
+        return resolve(player[weaponKey]);
       }
 
-      // Try to load optional JSON config for the sword (orientation, offsets, bone name)
-      let cfg = {
-        file: "weapons/Katana Sword.glb",
-        attachBone: "RightHand",
-        hiltOffset: { x: 0.35, y: 1.5, z: 0.2 },
-        hiltRotation: { x: 0.15, y: 0, z: 0 }
-      };
+      let cfg = Object.assign({}, defaults);
 
       try {
-        const r = await fetch("/assets/weapons/Katana Sword.json");
+        const r = await fetch(configUrl);
         if (r.ok) {
           const userCfg = await r.json();
           cfg = Object.assign(cfg, userCfg);
         }
       } catch (e) {
-        // Ignore missing config — use defaults above
+        // Ignore missing config and keep the defaults above.
       }
 
       BABYLON.SceneLoader.ImportMesh(
@@ -108,111 +234,149 @@ export const Renderer = (() => {
         scene,
         function (meshes, _ps, _sk, _ag) {
           if (!meshes || meshes.length === 0) {
-            return reject(new Error("Failed to load sword model"));
+            return reject(new Error("Failed to load " + label.toLowerCase() + " model"));
           }
 
-          // Create a parent transform for the sword meshes
-          const swordRoot = new BABYLON.TransformNode("swordRoot", scene);
-          // Apply scale from config (default 1)
-          const s = typeof cfg.scale === 'number' ? cfg.scale : 1.0;
-          swordRoot.scaling = new BABYLON.Vector3(s, s, s);
+          // Stop any animations from the weapon model to prevent autoplay/looping
+          if (_ag && _ag.length > 0) {
+            console.log("[" + label + "] Available animations:", _ag.map(ag => ag.name));
+            _ag.forEach(ag => {
+              ag.stop();
+            });
+          }
 
-          // Parent all sword meshes to the root
+          const weaponRoot = new BABYLON.TransformNode(weaponKey + "Root", scene);
+          const s = typeof cfg.scale === "number" ? cfg.scale : 1.0;
+          weaponRoot.scaling = new BABYLON.Vector3(s, s, s);
+
           meshes.forEach(mesh => {
-            mesh.parent = swordRoot;
+            mesh.parent = weaponRoot;
             if (mesh.getTotalVertices && mesh.getTotalVertices() > 0) {
               try { shadowGenerator.addShadowCaster(mesh, true); } catch (_) {}
               mesh.receiveShadows = true;
             }
           });
 
-          // Create a pivot mesh that will be attached to the bone if possible
-          const pivot = new BABYLON.Mesh("swordPivot", scene);
+          const pivot = new BABYLON.Mesh(weaponKey + "Pivot", scene);
           pivot.isVisible = false;
-
-          // Default: parent pivot to visualRoot (local space)
           pivot.parent = player.visualRoot;
 
-          // If we have a skinned mesh and a bone name, attach pivot to that bone
           if (player.skinnedMesh && player.skinnedMesh.skeleton && cfg.attachBone) {
             const bone = player.skinnedMesh.skeleton.bones.find(b => b.name === cfg.attachBone);
             if (bone) {
               try {
                 pivot.attachToBone(bone, player.skinnedMesh);
-                // When attached to bone, keep swordRoot parented to pivot so it follows bone
-                swordRoot.parent = pivot;
-                player.sword = { root: swordRoot, meshes: meshes, pivotAttached: true, pivot };
-                // Apply local offsets/rotation
-                swordRoot.position = new BABYLON.Vector3(cfg.hiltOffset.x, cfg.hiltOffset.y, cfg.hiltOffset.z);
-                swordRoot.rotation = new BABYLON.Vector3(cfg.hiltRotation.x, cfg.hiltRotation.y, cfg.hiltRotation.z);
-                return resolve(player.sword);
+                weaponRoot.parent = pivot;
+                player[weaponKey] = { root: weaponRoot, meshes: meshes, pivotAttached: true, pivot, animGroups: _ag, config: cfg };
+                weaponRoot.position = new BABYLON.Vector3(cfg.hiltOffset.x, cfg.hiltOffset.y, cfg.hiltOffset.z);
+                weaponRoot.rotation = new BABYLON.Vector3(cfg.hiltRotation.x, cfg.hiltRotation.y, cfg.hiltRotation.z);
+                return resolve(player[weaponKey]);
               } catch (e) {
-                console.warn("[Sword] Could not attach to bone, falling back to visualRoot", e);
+                console.warn("[" + label + "] Could not attach to bone, falling back to visualRoot", e);
               }
             }
           }
 
-          // Fallback: parent swordRoot to visualRoot and set local transform
-          swordRoot.parent = player.visualRoot;
-          swordRoot.position = new BABYLON.Vector3(cfg.hiltOffset.x, cfg.hiltOffset.y, cfg.hiltOffset.z);
-          swordRoot.rotation = new BABYLON.Vector3(cfg.hiltRotation.x, cfg.hiltRotation.y, cfg.hiltRotation.z);
+          weaponRoot.parent = player.visualRoot;
+          weaponRoot.position = new BABYLON.Vector3(cfg.hiltOffset.x, cfg.hiltOffset.y, cfg.hiltOffset.z);
+          weaponRoot.rotation = new BABYLON.Vector3(cfg.hiltRotation.x, cfg.hiltRotation.y, cfg.hiltRotation.z);
 
-          player.sword = { root: swordRoot, meshes: meshes, pivotAttached: false };
-          resolve(player.sword);
+          player[weaponKey] = { root: weaponRoot, meshes: meshes, pivotAttached: false, animGroups: _ag, config: cfg };
+          resolve(player[weaponKey]);
         },
-        function (evt) {
-          // Progress — ignored
+        function (_evt) {
+          // Progress ignored.
         },
-        function (sceneErr, msg, ex) {
+        function (_sceneErr, msg, ex) {
           const detail = (ex && ex.message) ? ex.message : String(msg ?? "unknown error");
-          console.error("[Sword] Load failed:", detail);
-          reject(new Error("Failed to load sword — " + detail));
+          console.error("[" + label + "] Load failed:", detail);
+          reject(new Error("Failed to load " + label.toLowerCase() + " — " + detail));
         }
       );
     });
   }
 
-  function updateSwordPosition(player) {
-    if (!player.sword || !player.sword.root) return;
+  function updateHeldWeaponPosition(player, weaponKey, defaults) {
+    const weapon = player[weaponKey];
+    if (!weapon || !weapon.root) return;
 
-    // If sword is attached to a bone pivot we don't need to update world position
-    if (player.sword.pivotAttached) return;
+    if (weapon.pivotAttached) return;
 
-    const swordRoot = player.sword.root;
-
-    // Local offsets (if not attached to bone) — tweak via JSON config
-    const handOffsetLocal = new BABYLON.Vector3(0.35, 1.5, 0.2);
-    swordRoot.position.copyFrom(handOffsetLocal);
-    swordRoot.rotation.x = 0.15;
-    swordRoot.rotation.y = 0;
-    swordRoot.rotation.z = 0;
+    const weaponRoot = weapon.root;
+    const offset = defaults.hiltOffset;
+    const rotation = defaults.hiltRotation;
+    weaponRoot.position.copyFrom(new BABYLON.Vector3(offset.x, offset.y, offset.z));
+    weaponRoot.rotation.x = rotation.x;
+    weaponRoot.rotation.y = rotation.y;
+    weaponRoot.rotation.z = rotation.z;
   }
 
-  // ── Sword equipment ───────────────────────────────────────────────────────
-  async function equipSword(player) {
+  async function equipHeldWeapon(player, weaponKey, label, defaults, configUrl) {
     if (!player) return;
     try {
-      await loadSwordModel(player);
-      // Position the sword immediately when not attached to bone
-      if (player.sword && !player.sword.pivotAttached) updateSwordPosition(player);
+      await loadHeldWeaponModel(player, weaponKey, label, defaults, configUrl);
+      if (player[weaponKey] && !player[weaponKey].pivotAttached) {
+        updateHeldWeaponPosition(player, weaponKey, defaults);
+      }
     } catch (err) {
-      console.error("[Sword] Failed to equip:", err);
+      console.error("[" + label + "] Failed to equip:", err);
     }
+  }
+
+  function unequipHeldWeapon(player, weaponKey, label) {
+    if (!player || !player[weaponKey]) return;
+    try {
+      if (player[weaponKey].root) {
+        player[weaponKey].root.dispose();
+      }
+      player[weaponKey].meshes?.forEach(m => {
+        try { m.dispose(); } catch (_) {}
+      });
+      player[weaponKey] = null;
+    } catch (err) {
+      console.error("[" + label + "] Failed to unequip:", err);
+    }
+  }
+
+  // ── Held weapon wrappers ─────────────────────────────────────────────────
+  function loadSwordModel(player) {
+    return loadHeldWeaponModel(player, "sword", "Sword", SWORD_DEFAULTS, "/assets/weapons/Katana Sword.json");
+  }
+
+  function updateSwordPosition(player) {
+    return updateHeldWeaponPosition(player, "sword", SWORD_DEFAULTS);
+  }
+
+  async function equipSword(player) {
+    return equipHeldWeapon(player, "sword", "Sword", SWORD_DEFAULTS, "/assets/weapons/Katana Sword.json");
   }
 
   function unequipSword(player) {
-    if (!player || !player.sword) return;
-    try {
-      if (player.sword.root) {
-        player.sword.root.dispose();
-      }
-      player.sword.meshes?.forEach(m => {
-        try { m.dispose(); } catch (_) {}
-      });
-      player.sword = null;
-    } catch (err) {
-      console.error("[Sword] Failed to unequip:", err);
-    }
+    return unequipHeldWeapon(player, "sword", "Sword");
+  }
+
+  function loadGunModel(player) {
+    return loadHeldWeaponModel(player, "gun", "Gun", GUN_DEFAULTS, "/assets/weapons/Animated Pistol.json");
+  }
+
+  function updateGunPosition(player) {
+    return updateHeldWeaponPosition(player, "gun", GUN_DEFAULTS);
+  }
+
+  async function equipGun(player) {
+    return equipHeldWeapon(player, "gun", "Gun", GUN_DEFAULTS, "/assets/weapons/Animated Pistol.json");
+  }
+
+  function unequipGun(player) {
+    return unequipHeldWeapon(player, "gun", "Gun");
+  }
+
+  function playWeaponAnim(weaponKey, animName, loop = false) {
+    if (!localPlayer || !localPlayer[weaponKey]) return false;
+    const weapon = localPlayer[weaponKey];
+    if (!weapon.animGroups || !weapon.animGroups.length) return false;
+    
+    return playAnimRange(weapon.animGroups, animName, { loop });
   }
 
   // ── Loading bar ───────────────────────────────────────────────────────────
@@ -276,6 +440,131 @@ export const Renderer = (() => {
     return min && max ? { min, max } : null;
   }
 
+  function getBoundsCorners(bounds) {
+    if (!bounds?.min || !bounds?.max) return [];
+
+    const { min, max } = bounds;
+    return [
+      new BABYLON.Vector3(min.x, min.y, min.z),
+      new BABYLON.Vector3(min.x, min.y, max.z),
+      new BABYLON.Vector3(min.x, max.y, min.z),
+      new BABYLON.Vector3(min.x, max.y, max.z),
+      new BABYLON.Vector3(max.x, min.y, min.z),
+      new BABYLON.Vector3(max.x, min.y, max.z),
+      new BABYLON.Vector3(max.x, max.y, min.z),
+      new BABYLON.Vector3(max.x, max.y, max.z)
+    ];
+  }
+
+  function getWeaponForwardVector(weapon) {
+    if (!weapon?.root) return null;
+
+    try {
+      const forward = weapon.root.getDirection(BABYLON.Axis.Z);
+      return forward.normalize();
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  function getWeaponMuzzlePoint(weapon) {
+    if (!weapon?.root) return null;
+
+    const rootMatrix = weapon.root.getWorldMatrix ? weapon.root.getWorldMatrix() : null;
+    const origin = weapon.root.getAbsolutePosition
+      ? weapon.root.getAbsolutePosition().clone()
+      : weapon.root.position.clone();
+
+    const muzzleOffset = weapon.config?.muzzleOffset;
+    if (rootMatrix && muzzleOffset) {
+      const offset = new BABYLON.Vector3(
+        Number(muzzleOffset.x) || 0,
+        Number(muzzleOffset.y) || 0,
+        Number(muzzleOffset.z) || 0
+      );
+      return BABYLON.Vector3.TransformCoordinates(offset, rootMatrix);
+    }
+
+    const forward = getWeaponForwardVector(weapon);
+    if (!forward) return origin.clone();
+
+    const bounds = getHierarchyBounds(weapon.meshes);
+    if (!bounds) {
+      return origin.add(forward.scale(0.45));
+    }
+
+    let bestPoint = null;
+    let bestScore = -Infinity;
+
+    for (const corner of getBoundsCorners(bounds)) {
+      const score = BABYLON.Vector3.Dot(corner.subtract(origin), forward);
+      if (score > bestScore) {
+        bestScore = score;
+        bestPoint = corner;
+      }
+    }
+
+    return bestPoint ? bestPoint.add(forward.scale(0.05)) : origin.add(forward.scale(0.45));
+  }
+
+  function getWeaponRayRange(weaponKey, weapon) {
+    const configuredRange = Number(weapon?.config?.rayRange);
+    if (Number.isFinite(configuredRange) && configuredRange > 0) {
+      return configuredRange;
+    }
+
+    return weaponKey === "gun" ? 8 : 3;
+  }
+
+  function showDebugRay(origin, direction, length) {
+    if (!DEBUG || !scene || !origin || !direction || !Number.isFinite(length) || length <= 0) return;
+
+    const end = origin.add(direction.scale(length));
+    const ray = BABYLON.MeshBuilder.CreateLines(
+      "debugRay",
+      { points: [origin.clone(), end] },
+      scene
+    );
+
+    ray.color = new BABYLON.Color3(1, 0, 0);
+    ray.alpha = 0.95;
+    ray.isPickable = false;
+
+    window.setTimeout(() => {
+      try {
+        ray.dispose();
+      } catch (_) {}
+    }, 120);
+  }
+
+  function getWeaponRayData(weaponKey) {
+    if (!localPlayer || !scene) return null;
+
+    const weapon = localPlayer[weaponKey];
+    if (!weapon?.root) return null;
+
+    const origin = getWeaponMuzzlePoint(weapon);
+    const direction = getWeaponForwardVector(weapon);
+    if (!origin || !direction) return null;
+
+    const ray = new BABYLON.Ray(origin, direction, getWeaponRayRange(weaponKey, weapon));
+    const pick = scene.pickWithRay(
+      ray,
+      mesh => Boolean(mesh?.metadata?.characterCollider) && mesh !== localPlayer.collider
+    );
+
+    return {
+      origin,
+      direction,
+      length: ray.length
+    };
+  }
+
+  function showWeaponRay(rayData) {
+    if (!rayData) return;
+    showDebugRay(rayData.origin, rayData.direction, rayData.length);
+  }
+
   function buildCharacterCollision(meshes, fallbackCollision) {
     const bounds = getHierarchyBounds(meshes);
     if (!bounds) return sanitizeCollision(fallbackCollision);
@@ -309,10 +598,11 @@ export const Renderer = (() => {
     );
 
     collider.isVisible = false;
-    collider.isPickable = false;
+    collider.isPickable = true;
     collider.checkCollisions = true;
     collider.ellipsoid = new BABYLON.Vector3(shape.radius, shape.height / 2, shape.radius);
     collider.ellipsoidOffset = new BABYLON.Vector3(0, shape.height / 2, 0);
+    collider.metadata = { characterCollider: true };
 
     return collider;
   }
@@ -598,6 +888,7 @@ export const Renderer = (() => {
             animGroups,
             config: charConfig,
             collision,
+            health: 100,
             lastAppliedCorrectionVersion: 0,
             currentAnim: idleAnimName,
             jumpState: null,
@@ -609,6 +900,14 @@ export const Renderer = (() => {
           // Store skeletons/skinned mesh for later attachment
           localPlayer.skeletons = skeletons || null;
           localPlayer.skinnedMesh = skinnedMesh;
+          localPlayer.collider.metadata = {
+            characterCollider: true,
+            playerId: "local"
+          };
+          localPlayer.swordEquipped = false;
+          localPlayer.gunEquipped = false;
+          localPlayer.sword = null;
+          localPlayer.gun = null;
           setLoadProgress(85, "Character ready.");
           resolve(localPlayer);
         },
@@ -630,7 +929,7 @@ export const Renderer = (() => {
   }
 
   // ── Load remote player ────────────────────────────────────────────────────
-  function addRemotePlayer(id, charConfig, spawnPos, collisionFromServer) {
+  function addRemotePlayer(id, charConfig, spawnPos, collisionFromServer, healthFromServer) {
     return new Promise((resolve) => {
       BABYLON.SceneLoader.ImportMesh(
         "", "/assets/", charConfig.file, scene,
@@ -663,11 +962,16 @@ export const Renderer = (() => {
             root.position.y,
             root.position.z
           );
+          collider.metadata = {
+            characterCollider: true,
+            playerId: id
+          };
 
           const idleAnimName = charConfig.animations?.idle ?? "Idle";
           playAnim(animGroups, idleAnimName, true);
 
           const nameTag = makeNameTag("P_" + id.slice(0, 6), root, collision.height);
+          const healthBar = createRemoteHealthBar("P_" + id.slice(0, 6), root, collision.height, healthFromServer);
           const skinnedMesh = (meshes || []).find(m => m.skeleton) || null;
           remotePlayers[id] = {
             root,
@@ -675,13 +979,17 @@ export const Renderer = (() => {
             collider,
             animGroups,
             nameTag,
+            healthBar,
+            health: clampHealth(healthFromServer ?? 100),
             currentAnim: idleAnimName,
             currentJumpPhase: null,
             collision,
             skeletons: skeletons || null,
             skinnedMesh,
             swordEquipped: false,
-            sword: null
+            gunEquipped: false,
+            sword: null,
+            gun: null
           };
           resolve(remotePlayers[id]);
         }
@@ -719,7 +1027,7 @@ export const Renderer = (() => {
 
     const playerHeight = Number(collision?.height);
     const tagHeight = Number.isFinite(playerHeight) && playerHeight > 0
-      ? Math.max(2.0, playerHeight + 0.35)
+      ? getMarkerHeight(playerHeight)
       : 2.6;
 
     nameTag.position.y = tagHeight;
@@ -732,11 +1040,14 @@ export const Renderer = (() => {
     try { rp.root.dispose(); }     catch (_) {}
     try { if (rp.collider) rp.collider.dispose(); } catch (_) {}
     try { if (rp.nameTag) rp.nameTag.dispose(); } catch (_) {}
+    try { if (rp.healthBar?.plane) rp.healthBar.plane.dispose(); } catch (_) {}
+    try { if (rp.healthBar?.material) rp.healthBar.material.dispose(); } catch (_) {}
+    try { if (rp.healthBar?.texture) rp.healthBar.texture.dispose(); } catch (_) {}
     delete remotePlayers[id];
   }
 
   // ── Update remote player ──────────────────────────────────────────────────
-  function updateRemotePlayer(id, position, rotation, animName, swordEquipped, collision, jumpPhase) {
+  function updateRemotePlayer(id, position, rotation, animName, swordEquipped, gunEquipped, collision, jumpPhase, health) {
     const rp = remotePlayers[id];
     if (!rp) return;
 
@@ -749,9 +1060,23 @@ export const Renderer = (() => {
       }
     }
 
+    if (typeof gunEquipped === "boolean" && gunEquipped !== rp.gunEquipped) {
+      rp.gunEquipped = gunEquipped;
+      if (rp.gunEquipped) {
+        equipGun(rp);
+      } else {
+        unequipGun(rp);
+      }
+    }
+
     if (collision) {
       rp.collision = sanitizeCollision(collision);
-      updateNameTagPosition(rp.nameTag, rp.collision);
+      updateRemoteMarkerPosition(rp.nameTag, rp.healthBar, rp.collision);
+    }
+
+    if (typeof health === "number") {
+      rp.health = clampHealth(health);
+      updateRemoteHealthBar(rp.healthBar, rp.health);
     }
 
     const nextPosition = BABYLON.Vector3.Lerp(
@@ -819,7 +1144,7 @@ export const Renderer = (() => {
     return true;
   }
 
-  function setLocalPlayerState(position, rotation, collision, correctionVersion) {
+  function setLocalPlayerState(position, rotation, collision, correctionVersion, health) {
     if (!localPlayer) return;
 
     if (typeof correctionVersion === "number") {
@@ -832,6 +1157,10 @@ export const Renderer = (() => {
 
     if (collision) {
       localPlayer.collision = sanitizeCollision(collision);
+    }
+
+    if (typeof health === "number") {
+      localPlayer.health = clampHealth(health);
     }
 
     const nextPosition = new BABYLON.Vector3(position.x, position.y, position.z);
@@ -1084,10 +1413,16 @@ export const Renderer = (() => {
     hideLoadingScreen,
     playAnim,
     playJumpPhase,
+    playWeaponAnim,
     equipSword,
     unequipSword,
     updateSwordPosition,
+    equipGun,
+    unequipGun,
+    updateGunPosition,
     requestJump,
+    getWeaponRayData,
+    showWeaponRay,
 
     getScene:   () => scene,
     getCamera:  () => camera,

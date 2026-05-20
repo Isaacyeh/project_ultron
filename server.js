@@ -18,8 +18,12 @@ app.use(express.static(path.join(__dirname, "public")));
 const SPAWN = { x: 0, y: 0, z: 0 };
 
 const players = {}; // socketId → playerState
+const respawnTimers = {}; // socketId → timeout handle
 
 const DEFAULT_COLLISION = { radius: 0.6, height: 1.8 };
+const MAX_HEALTH = 100;
+const GUN_DAMAGE = 10;
+const RESPAWN_DELAY_MS = 1200;
 
 function sanitizeCollision(collision) {
   const radius = Number(collision?.radius);
@@ -38,6 +42,147 @@ function attachCollision(state, collision) {
 
 function bumpCorrectionVersion(player) {
   player.correctionVersion = (player.correctionVersion ?? 0) + 1;
+}
+
+function clampHealth(value) {
+  const health = Number(value);
+  if (!Number.isFinite(health)) return MAX_HEALTH;
+  return Math.max(0, Math.min(MAX_HEALTH, Math.round(health)));
+}
+
+function clampVector3(value) {
+  const x = Number(value?.x);
+  const y = Number(value?.y);
+  const z = Number(value?.z);
+
+  if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) {
+    return null;
+  }
+
+  return { x, y, z };
+}
+
+function normalizeVector3(vector) {
+  const length = Math.hypot(vector.x, vector.y, vector.z);
+  if (!Number.isFinite(length) || length <= 0) return null;
+  return { x: vector.x / length, y: vector.y / length, z: vector.z / length };
+}
+
+function getPlayerCenter(player) {
+  return {
+    x: player.position.x,
+    y: player.position.y + getHeight(player) * 0.5,
+    z: player.position.z
+  };
+}
+
+function findGunRayHit(attackerId, rayOrigin, rayDirection, rayLength) {
+  const origin = clampVector3(rayOrigin);
+  const direction = clampVector3(rayDirection);
+  const maxLength = Number(rayLength);
+
+  if (!origin || !direction || !Number.isFinite(maxLength) || maxLength <= 0) {
+    return null;
+  }
+
+  const normalizedDirection = normalizeVector3(direction);
+  if (!normalizedDirection) return null;
+
+  let bestHit = null;
+  let bestProjection = Infinity;
+
+  for (const [id, player] of Object.entries(players)) {
+    if (id === attackerId || !player || player.health <= 0) continue;
+
+    const hit = rayIntersectsPlayerCollider(origin, normalizedDirection, maxLength, player);
+    if (hit && hit.distance < bestProjection) {
+      bestProjection = hit.distance;
+      bestHit = player;
+    }
+  }
+
+  return bestHit;
+}
+
+function rayIntersectsPlayerCollider(origin, direction, maxLength, player) {
+  const radius = getRadius(player);
+  const height = getHeight(player);
+  const min = {
+    x: player.position.x - radius,
+    y: player.position.y,
+    z: player.position.z - radius
+  };
+  const max = {
+    x: player.position.x + radius,
+    y: player.position.y + height,
+    z: player.position.z + radius
+  };
+
+  let tMin = 0;
+  let tMax = maxLength;
+
+  for (const axis of ["x", "y", "z"]) {
+    const rayDir = direction[axis];
+    const rayOrigin = origin[axis];
+    const axisMin = min[axis];
+    const axisMax = max[axis];
+
+    if (Math.abs(rayDir) < 1e-8) {
+      if (rayOrigin < axisMin || rayOrigin > axisMax) return null;
+      continue;
+    }
+
+    const invDir = 1 / rayDir;
+    let t1 = (axisMin - rayOrigin) * invDir;
+    let t2 = (axisMax - rayOrigin) * invDir;
+    if (t1 > t2) {
+      const temp = t1;
+      t1 = t2;
+      t2 = temp;
+    }
+
+    tMin = Math.max(tMin, t1);
+    tMax = Math.min(tMax, t2);
+    if (tMax < tMin) return null;
+  }
+
+  return { distance: tMin };
+}
+
+function syncPlayerHealth(player, health) {
+  player.health = clampHealth(health);
+  return player.health;
+}
+
+function scheduleRespawn(id) {
+  if (respawnTimers[id]) return;
+
+  respawnTimers[id] = setTimeout(() => {
+    delete respawnTimers[id];
+
+    const player = players[id];
+    if (!player) return;
+
+    player.position = { ...SPAWN };
+    player.rotation = 0;
+    player.animation = "Idle";
+    player.jumpPhase = null;
+    syncPlayerHealth(player, MAX_HEALTH);
+    bumpCorrectionVersion(player);
+    emitWorldState();
+    io.emit("playerUpdated", {
+      id,
+      position: player.position,
+      rotation: player.rotation,
+      animation: player.animation,
+      jumpPhase: player.jumpPhase,
+      swordEquipped: player.swordEquipped,
+      gunEquipped: player.gunEquipped,
+      collision: player.collision,
+      correctionVersion: player.correctionVersion ?? 0,
+      health: player.health
+    });
+  }, RESPAWN_DELAY_MS);
 }
 
 function getHeight(player) {
@@ -120,7 +265,8 @@ function createPlayer(id) {
     animation: "Idle",
     jumpPhase: null,
     swordEquipped: false,
-    health: 100,
+    gunEquipped: false,
+    health: MAX_HEALTH,
     name: `Player_${id.slice(0, 4)}`,
     correctionVersion: 0
   });
@@ -158,6 +304,9 @@ io.on("connection", (socket) => {
     if (typeof data.swordEquipped === "boolean") {
       p.swordEquipped = data.swordEquipped;
     }
+    if (typeof data.gunEquipped === "boolean") {
+      p.gunEquipped = data.gunEquipped;
+    }
     attachCollision(p, data.collision);
 
     resolvePlayerSeparation(players);
@@ -170,11 +319,81 @@ io.on("connection", (socket) => {
       animation: p.animation,
       jumpPhase: p.jumpPhase,
       swordEquipped: p.swordEquipped,
+      gunEquipped: p.gunEquipped,
       collision: p.collision,
-      correctionVersion: p.correctionVersion ?? 0
+      correctionVersion: p.correctionVersion ?? 0,
+      health: p.health
     });
 
     emitWorldState();
+  });
+
+  socket.on("damagePlayer", (data) => {
+    const attacker = players[socket.id];
+    let targetId = data?.targetId;
+    let target = targetId ? players[targetId] : null;
+
+    if (!attacker) return;
+    if (targetId === socket.id) return;
+
+    const weaponType = data?.weaponType === "gun" ? "gun" : "sword";
+    const damage = weaponType === "gun" ? GUN_DAMAGE : 25;
+    const maxRange = weaponType === "gun" ? 8 : 3;
+    const allowedDot = weaponType === "gun" ? 0.1 : 0.35;
+
+    if (weaponType === "gun") {
+      const rayOrigin = clampVector3(data?.rayOrigin);
+      const rayDirection = clampVector3(data?.rayDirection);
+      const rayLength = Number(data?.rayLength);
+
+      if (!rayOrigin || !rayDirection || !Number.isFinite(rayLength) || rayLength <= 0 || rayLength > maxRange) {
+        return;
+      }
+
+      const hitTarget = findGunRayHit(socket.id, rayOrigin, rayDirection, rayLength);
+      if (!hitTarget) {
+        return;
+      }
+
+      targetId = hitTarget.id;
+      target = hitTarget;
+    } else {
+      if (!target) return;
+
+      const dx = target.position.x - attacker.position.x;
+      const dz = target.position.z - attacker.position.z;
+      const distance = Math.hypot(dx, dz);
+      if (!Number.isFinite(distance) || distance > maxRange || distance < 0.1) return;
+
+      const forward = { x: Math.sin(attacker.rotation), z: Math.cos(attacker.rotation) };
+      const length = Math.hypot(dx, dz) || 1;
+      const dot = (forward.x * dx + forward.z * dz) / length;
+      if (dot < allowedDot) return;
+    }
+
+    if (target.health <= 0) return;
+
+    syncPlayerHealth(target, target.health - damage);
+    bumpCorrectionVersion(target);
+
+    io.emit("playerUpdated", {
+      id: target.id,
+      position: target.position,
+      rotation: target.rotation,
+      animation: target.animation,
+      jumpPhase: target.jumpPhase,
+      swordEquipped: target.swordEquipped,
+      gunEquipped: target.gunEquipped,
+      collision: target.collision,
+      correctionVersion: target.correctionVersion ?? 0,
+      health: target.health
+    });
+
+    emitWorldState();
+
+    if (target.health <= 0) {
+      scheduleRespawn(target.id);
+    }
   });
 
   // ── Chat ─────────────────────────────────────────────────────────────────
@@ -192,6 +411,10 @@ io.on("connection", (socket) => {
   // ── Disconnect ────────────────────────────────────────────────────────────
   socket.on("disconnect", () => {
     console.log(`[-] Player disconnected: ${socket.id}`);
+    if (respawnTimers[socket.id]) {
+      clearTimeout(respawnTimers[socket.id]);
+      delete respawnTimers[socket.id];
+    }
     delete players[socket.id];
     io.emit("playerLeft", socket.id);
   });

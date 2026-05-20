@@ -1,7 +1,7 @@
 {
   "file": "weapons/Katana Sword.glb",
   "attachBone": "Fist.R",
-  "hiltOffset": { "x": 0.0, "y": 0.0, "z": 0.0 },
+  "hiltOffset": { "x": 0.0, "y": 0.125, "z": 0 },
   "hiltRotation": { "x": 1, "y": 3, "z": 3.141592653589793 },
   "scale": 0.75,
   "notes": "Tune hiltOffset and hiltRotation until the sword hilt sits correctly in the model's right hand. If the model's bone name differs, set attachBone accordingly (e.g., RightHand, Hand.R, mixamorig:RightHand)."
